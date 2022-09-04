@@ -5,6 +5,8 @@ from context_model import ContextModel
 from entropy_models import __CONDITIONS__, EntropyBottleneck
 from generalizedivisivenorm import GeneralizedDivisiveNorm
 from modules import Conv2d, ConvTranspose2d
+from transformer.Models import get_subsequent_mask, Encoder, Decoder
+from util.tokenizer import feat2token, token2feat
 
 
 class CompressesModel(nn.Module):
@@ -225,6 +227,180 @@ class GoogleHyperPriorCoder(HyperPriorCoder):
         else:
             self.hyper_synthesis = GoogleHyperScaleSynthesisTransform(
                 num_features, num_filters, num_hyperpriors)
+
+
+class ResidualBlock(nn.Sequential):
+    """Builds the residual block"""
+
+    def __init__(self, num_filters):
+        super(ResidualBlock, self).__init__(
+            nn.LeakyReLU(0.2, inplace=True),
+            Conv2d(num_filters, num_filters, 3, stride=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            Conv2d(num_filters, num_filters, 3, stride=1),
+        )
+
+    def forward(self, input):
+        return input + super().forward(input)
+
+
+class VCTAnalysisTransform(nn.Sequential):
+    def __init__(self, in_channels, num_features, num_filters, kernel_size):
+        super(GoogleAnalysisTransform, self).__init__(
+            Conv2d(in_channels, num_filters, kernel_size, stride=2),
+            nn.LeakyReLU(0.2, inplace=True),
+            Conv2d(num_filters, num_filters, kernel_size, stride=2),
+            nn.LeakyReLU(0.2, inplace=True),
+            Conv2d(num_filters, num_filters, kernel_size, stride=2),
+            nn.LeakyReLU(0.2, inplace=True),
+            Conv2d(num_filters, num_features, kernel_size, stride=2)
+        )
+
+
+class VCTSynthesisTransform(nn.Sequential):
+    def __init__(self, out_channels, num_features, num_filters, kernel_size):
+        super(GoogleSynthesisTransform, self).__init__(
+            ResidualBlock(num_features),
+            ResidualBlock(num_features),
+            ResidualBlock(num_features),
+            ResidualBlock(num_features),
+            nn.LeakyReLU(0.2, inplace=True),
+            ConvTranspose2d(num_features, num_filters, kernel_size, stride=2),
+            nn.LeakyReLU(0.2, inplace=True),
+            ResidualBlock(num_filters),
+            ResidualBlock(num_filters),
+            ConvTranspose2d(num_filters, num_filters, kernel_size, stride=2),
+            nn.LeakyReLU(0.2, inplace=True),
+            ResidualBlock(num_filters),
+            ResidualBlock(num_filters),
+            ConvTranspose2d(num_filters, num_filters, kernel_size, stride=2),
+            nn.LeakyReLU(0.2, inplace=True),
+            ConvTranspose2d(num_filters, out_channels, kernel_size, stride=2)
+        )
+
+
+class TransformerEntropyModel(nn.Module):
+    def __init__(self, w_c=4, w_p=8, d_C=192, d_T=768):
+        super(self, TransformerEntropyModel).__init__()
+
+        self.trans_sep = Encoder(d_word_vec=d_T, n_layers=6, n_head=16,
+                                 d_k=64, d_v=64, d_model=d_T, d_inner=2048,
+                                 use_proj=True, d_src_vocab=d_C,
+                                 dropout=0.1, n_position=w_p ** 2, scale_emb=False)
+
+        self.trans_joint = Encoder(d_word_vec=d_T, n_layers=4, n_head=16,
+                                   d_k=64, d_v=64, d_model=d_T, d_inner=2048,
+                                   use_proj=False, d_src_vocab=None, # Projection is not needed; it only use (temporal) embedding
+                                   dropout=0.1, n_position=2 * w_p ** 2, scale_emb=False)
+
+        self.trans_cur = Decoder(d_word_vec=d_T, n_layers=5, n_head=16,
+                                 d_k=64, d_v=64, d_model=d_T, d_inner=2048,
+                                 use_proj=True, d_src_vocab=d_C,
+                                 dropout=0.1, n_position=w_c ** 2, scale_emb=False)
+
+        # Mean & scale prediction
+        self.trg_word_prj = nn.Linear(d_T, d_C * 2, bias=False)
+
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p) 
+
+    def forward(self, src_seqs, trg_seq):
+        assert isinstance(src_seqs, list), "`src_seqs` should be a list"
+        
+        enc_outputs = []
+        for src_seq in src_seqs:
+            enc_output, *_ = self.trans_sep(src_seq, None)
+            enc_outputs.append(enc_output)
+
+        enc_outputs = torch.cat(enc_outputs, dim=1)
+
+        z_joint = self.trans_joint(enc_outputs)
+
+        mask = get_subsequent_mask(trg_seq)
+        dec_output, *_ = self.decoder(trg_seq, mask, z_joint, None)
+        condition = self.trg_word_prj(dec_output)
+        
+        # Multiply (\sqrt{d_model} ^ -1) to linear projection output
+        condition *= self.d_model ** -0.5
+
+        return condition
+
+
+class TransformerPriorCoder(CompressesModel):
+    """Transformer-based Entropy Coder that takes 2 previously decoded latents as temporal condition"""
+
+    def __init__(self, num_filters, num_features,
+                 in_channels=3, out_channels=3, kernel_size=5, 
+                 condition='Gaussian', quant_mode='noise'):
+
+        super(TransformerPriorCoder, self).__init__()
+
+        self.conditional_bottleneck = __CONDITIONS__[condition](use_mean=True, quant_mode=quant_mode)
+
+        self.analysis = VCTAnalysisTransform(in_channels, num_features, num_filters, kernel_size)
+        self.synthesis = VCTSynthesisTransform(out_channels, num_features, num_filters, kernel_size)
+
+        self.temporal_prior = TransformerEntropyModel()
+
+        self.divisor = 64
+        self.num_bitstreams = 1
+    #TODO
+    def compress(self, input, return_hat=False):
+        features = self.analysis(input)
+
+        hyperpriors = self.hyper_analysis(
+            features.abs() if self.use_abs else features)
+
+        side_stream, z_hat = self.entropy_bottleneck.compress(
+            hyperpriors, return_sym=True)
+
+        condition = self.hyper_synthesis(z_hat)
+
+        ret = self.conditional_bottleneck.compress(
+            features, condition=condition, return_sym=return_hat)
+
+        if return_hat:
+            stream, y_hat = ret
+            x_hat = self.synthesis(y_hat)
+            return x_hat, [stream, side_stream], [features.size(), hyperpriors.size()]
+        else:
+            stream = ret
+            return [stream, side_stream], [features.size(), hyperpriors.size()]
+
+    #TODO
+    def decompress(self, strings, shape):
+        stream, side_stream = strings
+        y_shape, z_shape = shape
+
+        z_hat = self.entropy_bottleneck.decompress(side_stream, z_shape)
+
+        condition = self.hyper_synthesis(z_hat)
+
+        y_hat = self.conditional_bottleneck.decompress(
+            stream, y_shape, condition=condition)
+
+        reconstructed = self.synthesis(y_hat)
+
+        return reconstructed
+
+    def forward(self, input, prev_features):
+        features = self.analysis(input)
+
+        cur_tokens = feat2token(features)
+        prev_tokens = [feat2token(feat) for feat in prev_features]
+
+        condition = self.temporal_prior(prev_tokens, cur_token)
+
+        mean, scale = condition.chunk(2, dim=2)
+
+        condition = torch.cat([token2feat(mean), token2feat(scale)], dim=1)
+
+        y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
+
+        reconstructed = self.synthesis(y_tilde)
+
+        return reconstructed, y_likelihood
 
 
 __CODER_TYPES__ = {
