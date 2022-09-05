@@ -584,9 +584,9 @@ if __name__ == '__main__':
         db = 'ddp'
 
     comet_logger = CometLogger(
-        api_key="", # Fill with your own
+        api_key="bFaTNhLcuqjt1mavz02XPVwN8", # Fill with your own
         project_name=project_name,
-        workspace="", # Fill with your own
+        workspace="tl32rodan", # Fill with your own
         experiment_name=experiment_name + "-" + str(args.lmda),
         experiment_key = args.restore_key if args.restore == 'resume' else None,
         disabled=args.test or args.debug
