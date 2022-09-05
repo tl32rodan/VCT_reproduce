@@ -15,7 +15,6 @@ class CompressesModel(nn.Module):
     def __init__(self):
         super(CompressesModel, self).__init__()
         self.divisor = None
-        self.num_bitstreams = 1
 
     def named_main_parameters(self, prefix=''):
         for name, param in self.named_parameters(prefix=prefix, recurse=True):
@@ -81,7 +80,6 @@ class HyperPriorCoder(FactorizedCoder):
         self.hyper_synthesis = nn.Sequential()
 
         self.divisor = 64
-        self.num_bitstreams = 2
 
     def compress(self, input, return_hat=False):
         features = self.analysis(input)
@@ -298,6 +296,8 @@ class TransformerEntropyModel(nn.Module):
                                  use_proj=True, d_src_vocab=d_C,
                                  dropout=0.1, n_position=w_c ** 2, scale_emb=False)
 
+        self.start_token = nn.Parameter((1, 1, d_C))
+        
         # Mean & scale prediction
         self.trg_word_prj = nn.Linear(d_T, d_C * 2, bias=False)
 
@@ -316,6 +316,10 @@ class TransformerEntropyModel(nn.Module):
         enc_outputs = torch.cat(enc_outputs, dim=1)
 
         z_joint = self.trans_joint(enc_outputs)
+        
+        # Add start token
+        start_token = torch.cat([self.start_token]*trg_seq.size(0), dim=0)
+        trg_seq = torch.cat([start_token, trg_seq], dim=1)
 
         mask = get_subsequent_mask(trg_seq)
         dec_output, *_ = self.decoder(trg_seq, mask, z_joint, None)
@@ -330,12 +334,13 @@ class TransformerEntropyModel(nn.Module):
 class TransformerPriorCoder(CompressesModel):
     """Transformer-based Entropy Coder that takes 2 previously decoded latents as temporal condition"""
 
-    def __init__(self, num_filters, num_features,
+    def __init__(self, num_filters, num_features, num_hyperpriors,
                  in_channels=3, out_channels=3, kernel_size=5, 
                  condition='Gaussian', quant_mode='noise'):
 
         super(TransformerPriorCoder, self).__init__()
 
+        self.entropy_bottleneck = EntropyBottleneck(num_hyperpriors, quant_mode=quant_mode)
         self.conditional_bottleneck = __CONDITIONS__[condition](use_mean=True, quant_mode=quant_mode)
 
         self.analysis = VCTAnalysisTransform(in_channels, num_features, num_filters, kernel_size)
@@ -343,8 +348,11 @@ class TransformerPriorCoder(CompressesModel):
 
         self.temporal_prior = TransformerEntropyModel()
 
+        self.hyper_analysis = GoogleHyperAnalysisTransform(num_features, num_filters, num_hyperpriors)
+        self.hyper_synthesis = GoogleHyperSynthesisTransform(num_features*self.conditional_bottleneck.condition_size, num_filters, num_hyperpriors)
+
         self.divisor = 64
-        self.num_bitstreams = 1
+
     #TODO
     def compress(self, input, return_hat=False):
         features = self.analysis(input)
@@ -384,25 +392,40 @@ class TransformerPriorCoder(CompressesModel):
 
         return reconstructed
 
-    def forward(self, input, prev_features):
+    def forward(self, input, use_prior='temp', prev_features=None):
+        assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
+        if use_prior == 'temp':
+            assert not (prev_features is None) and isinstance(prev_features, list), ValueError
+
         features = self.analysis(input)
+        
+        if use_prior == 'temp':
+            cur_tokens = feat2token(features)
+            prev_tokens = [feat2token(feat) for feat in prev_features]
 
-        cur_tokens = feat2token(features)
-        prev_tokens = [feat2token(feat) for feat in prev_features]
+            condition = self.temporal_prior(prev_tokens, cur_token)
 
-        condition = self.temporal_prior(prev_tokens, cur_token)
+            mean, scale = condition.chunk(2, dim=2)
 
-        mean, scale = condition.chunk(2, dim=2)
+            condition = torch.cat([token2feat(mean), token2feat(scale)], dim=1)
+        else:
+            hyperpriors = self.hyper_analysis(features)
 
-        condition = torch.cat([token2feat(mean), token2feat(scale)], dim=1)
+            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
+
+            condition = self.hyper_synthesis(z_tilde)
 
         y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
 
         reconstructed = self.synthesis(y_tilde)
 
-        return reconstructed, y_likelihood
+        if use_prior == 'temp':
+            return reconstructed, (y_likelihood, ), y_tilde
+        else:
+            return reconstructed, (y_likelihood, z_likelihood), y_tilde
 
 
 __CODER_TYPES__ = {
                    "GoogleHyperPriorCoder": GoogleHyperPriorCoder,
+                   "TransformerPriorCoder": TransformerPriorCoder,
                   }
