@@ -277,7 +277,7 @@ class VCTSynthesisTransform(nn.Sequential):
 
 
 class TransformerEntropyModel(nn.Module):
-    def __init__(self, w_c=4, w_p=8, d_C=192, d_T=768):
+    def __init__(self, w_c=4, w_p=8, d_C=192, d_T=192):
         super(TransformerEntropyModel, self).__init__()
 
         self.d_T = d_T

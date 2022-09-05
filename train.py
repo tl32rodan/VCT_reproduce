@@ -666,8 +666,9 @@ if __name__ == '__main__':
         summary(model.codec.analysis)
         summary(model.codec.synthesis)
         summary(model.codec.temporal_prior)
-        summary(model.codec.hyper_analysis)
-        summary(model.codec.hyper_synthesis)
+        summary(model.codec.temporal_prior.trans_sep)
+        summary(model.codec.temporal_prior.trans_joint)
+        summary(model.codec.temporal_prior.trans_cur)
 
     if args.test:
         trainer.test(model)
