@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from subprocess import Popen, PIPE
 
-from CANF_VC.util.vision import imgloader, rgb_transform
+from VCT.util.vision import imgloader, rgb_transform
 from PIL import Image
 
 libbpg_path = os.getenv('BPG') # Put your libbpg path here
