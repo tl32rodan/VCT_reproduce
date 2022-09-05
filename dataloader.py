@@ -16,6 +16,7 @@ from PIL import Image
 
 libbpg_path = os.getenv('BPG') # Put your libbpg path here
 
+
 class VimeoDataset(torchData):
     """ vimeo_septuplet dataset
         download: `$ wget http://data.csail.mit.edu/tofu/dataset/vimeo_septuplet.zip`
@@ -142,24 +143,6 @@ class VideoTestSequence(torchData):
 
             raw_path = os.path.join(self.root, dataset_name, seq_name, 'frame_{:d}.png'.format(frame_idx))
 
-            if frame_idx == frame_start:
-                img_root = os.path.join(self.root, 'bpg', str(self.qp), 'decoded', seq_name)
-                os.makedirs(img_root, exist_ok=True)
-
-                img_path = os.path.join(img_root, f'frame_{frame_idx}.png')
-
-                if not os.path.exists(img_path):
-                    # Compress data on-the-fly when they are not previously compressed.
-                    bin_path = img_path.replace('decoded', 'bin').replace('png', 'bin')
-
-                    os.makedirs(os.path.dirname(bin_path), exist_ok=True)
-                    os.makedirs(os.path.dirname(img_path), exist_ok=True)
-
-                    subprocess.call(f'{libbpg_path}/bpgenc -f 444 -q {self.qp} -o {bin_path} {raw_path}'.split(' '))
-                    subprocess.call(f'{libbpg_path}/bpgdec -o {img_path} {bin_path}'.split(' '))
-
-                imgs.append(transforms.ToTensor()(imgloader(img_path)))
-            
             imgs.append(transforms.ToTensor()(imgloader(raw_path)))
 
         return dataset_name, seq_name, stack(imgs), frame_start
@@ -252,6 +235,67 @@ class VideoTestData(torchData):
         
     def __len__(self):
         return len(self.gop_list)
+
+    def __getitem__(self, idx):
+        dataset_name, seq_name, frame_start, frame_end = self.gop_list[idx]
+        seed = random.randint(0, 1e9)
+        imgs = []
+         
+        # First image of `imgs` will be BPG-compressed frame
+        for frame_idx in range(frame_start, frame_end):
+            random.seed(seed)
+
+            raw_path = os.path.join(self.root, dataset_name, seq_name, 'frame_{:d}.png'.format(frame_idx))
+            
+            imgs.append(transforms.ToTensor()(imgloader(raw_path)))
+
+        return dataset_name, seq_name, stack(imgs), frame_start
+
+
+class VideoTestDataBPGIframe(VideoTestData):
+    """ Return I-frame compressed by BPG in the very begining of stack(imgs) """
+    def __init__(self, **kargs):
+        super(VideoTestDataBPGIframe, self).__init__(**kargs)
+
+    def __getitem__(self, idx):
+        dataset_name, seq_name, frame_start, frame_end = self.gop_list[idx]
+        seed = random.randint(0, 1e9)
+        imgs = []
+         
+        # First image of `imgs` will be BPG-compressed frame
+        for frame_idx in range(frame_start, frame_end):
+            random.seed(seed)
+
+            raw_path = os.path.join(self.root, dataset_name, seq_name, 'frame_{:d}.png'.format(frame_idx))
+
+            if frame_idx == frame_start:
+                img_root = os.path.join(self.root, 'bpg', str(self.qp), 'decoded', seq_name)
+                os.makedirs(img_root, exist_ok=True)
+
+                img_path = os.path.join(img_root, f'frame_{frame_idx}.png')
+
+                if not os.path.exists(img_path):
+                    # Compress data on-the-fly when they are not previously compressed.
+                    bin_path = img_path.replace('decoded', 'bin').replace('png', 'bin')
+
+                    os.makedirs(os.path.dirname(bin_path), exist_ok=True)
+                    os.makedirs(os.path.dirname(img_path), exist_ok=True)
+
+                    subprocess.call(f'{libbpg_path}/bpgenc -f 444 -q {self.qp} -o {bin_path} {raw_path}'.split(' '))
+                    subprocess.call(f'{libbpg_path}/bpgdec -o {img_path} {bin_path}'.split(' '))
+
+                imgs.append(transforms.ToTensor()(imgloader(img_path)))
+            
+            imgs.append(transforms.ToTensor()(imgloader(raw_path)))
+
+        return dataset_name, seq_name, stack(imgs), frame_start
+
+
+class VideoTestSequenceBPGIframe(VideoTestSequence):
+    """ Return I-frame compressed by BPG in the very begining of stack(imgs) """
+    def __init__(self, **kargs):
+        super(VideoTestSequenceBPGIframe, self).__init__(**kargs)
+
 
     def __getitem__(self, idx):
         dataset_name, seq_name, frame_start, frame_end = self.gop_list[idx]
