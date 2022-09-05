@@ -27,8 +27,6 @@ from VCT.util.ssim import MS_SSIM
 from VCT.util.vision import PlotFlow, PlotHeatMap, save_image
 from VCT.util.tools import Alignment
 
-plot_flow = PlotFlow().cuda() 
-
 phase = {'trainAE': 20, 
          'trainPrior': 30, 
          'trainAll': 35}
@@ -433,24 +431,24 @@ class VCT(CompressesModel):
         if current_epoch < phase['trainAE']:
             warmup = 1
             if current_epoch < 1: # Warmup
-                schedulers.append(optim.lr_scheduler.ConstantLR(optimizer, factor=1, total_iters=warmup)
+                schedulers.append(optim.lr_scheduler.ConstantLR(optimizer, factor=1, total_iters=warmup))
             schedulers.append(optim.lr_scheduler.LinearLR(optimizer,
                                                           start_factor=1, end_factor=0.1,
-                                                          total_iters=(phase['trainAE'] - warmup - current_epoch))
+                                                          total_iters=(phase['trainAE'] - warmup - current_epoch)))
         if current_epoch < phase['trainPrior']:
             warmup = 1
             if current_epoch < phase['trainAE'] + warmup: # Warmup
-                schedulers.append(optim.lr_scheduler.ConstantLR(optimizer, factor=1, total_iters=warmup)
+                schedulers.append(optim.lr_scheduler.ConstantLR(optimizer, factor=1, total_iters=warmup))
             schedulers.append(optim.lr_scheduler.LinearLR(optimizer,
                                                           start_factor=1, end_factor=0.1,
-                                                          total_iters=(phase['trainPrior'] - warmup - current_epoch))
+                                                          total_iters=(phase['trainPrior'] - warmup - current_epoch)))
         if current_epoch < phase['trainAll']:
             warmup = 1
             if current_epoch < phase['trainPrior'] + warmup: # Warmup
-                schedulers.append(optim.lr_scheduler.ConstantLR(optimizer, factor=0.25, total_iters=warmup)
+                schedulers.append(optim.lr_scheduler.ConstantLR(optimizer, factor=0.25, total_iters=warmup))
             schedulers.append(optim.lr_scheduler.LinearLR(optimizer,
                                                           start_factor=0.25, end_factor=0.1,
-                                                          total_iters=(phase['trainAll'] - warmup - current_epoch))
+                                                          total_iters=(phase['trainAll'] - warmup - current_epoch)))
 
             
         scheduler = optim.lr_scheduler.SequentialLR(optimizer, lr_step, lr_gamma)
@@ -548,7 +546,7 @@ if __name__ == '__main__':
 
     # give the module a chance to add own params
     # good practice to define LightningModule speficic params in the module
-    parser = Pframe.add_model_specific_args(parser)
+    parser = VCT.add_model_specific_args(parser)
 
     # training specific
     parser.add_argument('--restore', type=str, choices=['none', 'resume', 'load'], default='none')
@@ -629,7 +627,7 @@ if __name__ == '__main__':
         else:
             trainer.current_epoch = epoch_num + 1
         
-        model = Pframe(args).cuda()
+        model = VCT(args).cuda()
         model.load_state_dict(checkpoint['state_dict'], strict=True)
         
     else:
@@ -643,7 +641,7 @@ if __name__ == '__main__':
                                              num_sanity_val_steps=0,
                                              terminate_on_nan=True)
     
-        model = Pframe().cuda()
+        model = VCT().cuda()
 
     if args.verbose:
         summary(model)

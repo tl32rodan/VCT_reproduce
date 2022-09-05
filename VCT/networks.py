@@ -3,7 +3,6 @@ from torch import nn
 
 from context_model import ContextModel
 from entropy_models import __CONDITIONS__, EntropyBottleneck
-from generalizedivisivenorm import GeneralizedDivisiveNorm
 from modules import Conv2d, ConvTranspose2d
 from transformer.Models import get_subsequent_mask, Encoder, Decoder
 from util.tokenizer import feat2token, token2feat
