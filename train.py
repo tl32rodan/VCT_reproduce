@@ -21,15 +21,15 @@ from ptflops import get_model_complexity_info
 
 from dataloader import VimeoDataset, VideoTestData
 from VCT.entropy_models import EntropyBottleneck, estimate_bpp
-from VCT.networks import TransformerPriorCoder
+from VCT.networks import __CODER_TYPES__
 from VCT.util.psnr import mse2psnr
 from VCT.util.ssim import MS_SSIM
 from VCT.util.vision import PlotFlow, PlotHeatMap, save_image
 from VCT.util.tools import Alignment
 
-phase = {'trainAE': 20, 
-         'trainPrior': 30, 
-         'trainAll': 35}
+phase = {'trainAE': 2000000, # 2M
+         'trainPrior': 3000000, # 1M
+         'trainAll': 3250000} # 250K
 
 
 class CompressesModel(LightningModule):
@@ -66,11 +66,11 @@ class CompressesModel(LightningModule):
 
 
 class VCT(CompressesModel):
-    def __init__(self, args):
+    def __init__(self, args, codec):
         super(VCT, self).__init__()
         self.args = args
         self.criterion = nn.MSELoss(reduction='none') if not self.args.ssim else MS_SSIM(data_range=1.).cuda()
-        self.model = TransformerPriorCoder()
+        self.codec = codec
         self.latent_buffer = None
 
     def load_args(self, args):
@@ -79,13 +79,13 @@ class VCT(CompressesModel):
     def forward(self, coding_frame, frame_idx=0):
         if frame_idx == 0:
             self.latent_buffer = list()
-            reconstructed, likelihoods, latent = self.model(coding_frame, 'hyper')
+            reconstructed, likelihoods, latent = self.codec(coding_frame, 'hyper')
 
             # For first P-frame, 2 latents are needed so it needs to be duplicated
             self.latent_buffer.append(latent)
             self.latent_buffer.append(latent)
         else:
-            reconstructed, likelihoods, latent = self.model(coding_frame, 'temp', self.latent_buffer)
+            reconstructed, likelihoods, latent = self.codec(coding_frame, 'temp', self.latent_buffer)
             self.latent_buffer.pop(0)
             self.latent_buffer.append(latent)
             
@@ -94,12 +94,17 @@ class VCT(CompressesModel):
                 'likelihoods': likelihoods, 
                 'latent': latent
                }
-   
+    def disable_modules(self, modules):
+        for module in modules:
+            module.requires_grad_(False)
+            for param in module.parameters(): 
+               self.optimizers().state[param] = {} # remove all state (step, exp_avg, exp_avg_sg)
+
     def training_step(self, batch, batch_idx):
-        epoch = self.current_epoch
+        step = self.global_step
         batch = batch.cuda()
         
-        if epoch < phase['trainAE']:
+        if step < phase['trainAE']:
             coding_frame = batch[:, 0]
             info = self(coding_frame, 0)
 
@@ -112,14 +117,18 @@ class VCT(CompressesModel):
             loss = self.args.lmda * distortion.mean() + rate.mean()
             logs = {
                     'train/loss': loss.item(),
-                    'train/distortion': distortion.item(), 
-                    'train/PSNR': mse2psnr(distortion.item()), 
-                    'train/rate': rate.item(), 
+                    'train/distortion': distortion.mean().item(), 
+                    'train/PSNR': mse2psnr(distortion.mean().item()), 
+                    'train/rate': rate.mean().item(), 
                    }
-        elif epoch < phase['trainPrior']:
+        elif step < phase['trainPrior']:
+            # Disable AE
+            self.disable_modules([self.codec.analysis, self.codec.synthesis])
+
             # Prepare latents of first 2 frames
-            _ = self(batch[:, 0], 0)
-            _ = self(batch[:, 1], 1)
+            with torch.no_grad():
+                _ = self(batch[:, 0], 0)
+                _ = self(batch[:, 1], 1)
             
             loss = torch.tensor(0., dtype=torch.float, device=batch.device)
             for idx in range(2, 5):
@@ -135,12 +144,13 @@ class VCT(CompressesModel):
             logs = {
                     'train/rate': loss.item(),
                    }
-                
 
-        elif epoch < phase['trainAll']:
+        elif step < phase['trainAll']:
+            self.requires_grad_(True)
             # Prepare latents of first 2 frames
-            _ = self(batch[:, 0], 0)
-            _ = self(batch[:, 1], 1)
+            with torch.no_grad():
+                _ = self(batch[:, 0], 0)
+                _ = self(batch[:, 1], 1)
             
             loss = torch.tensor(0., dtype=torch.float, device=batch.device)
             total_distortion = torch.tensor(0., dtype=torch.float, device=batch.device)
@@ -189,7 +199,7 @@ class VCT(CompressesModel):
 
             self.logger.experiment.log_image(tnsr, name=tnsr_name, step=self.current_epoch, image_channels=ch, overwrite=True)
 
-        if self.args.msssim:
+        if self.args.ssim:
             similarity_metrics = 'MS-SSIM'
         else:
             similarity_metrics = 'PSNR'
@@ -219,7 +229,7 @@ class VCT(CompressesModel):
             rate = estimate_bpp(info['likelihoods'], input=rec_frame).mean().item()
 
             mse = self.criterion(rec_frame, coding_frame).mean().item()
-            if self.args.msssim:
+            if self.args.ssim:
                 similarity = mse
             else:
                 similarity = mse2psnr(mse)
@@ -268,18 +278,18 @@ class VCT(CompressesModel):
         logs = {'val/loss': avg_loss}
 
         for dataset_name, rd in rd_dict.items():
-            if self.args.msssim:
+            if self.args.ssim:
                 logs['val/'+dataset_name+' msssim'] = np.mean(rd['similarity'])
             else:
                 logs['val/'+dataset_name+' psnr'] = np.mean(rd['similarity'])
             logs['val/'+dataset_name+' rate'] = np.mean(rd['rate'])
 
         self.log_dict(logs)
-
+        print("\nCurrent step =", self.global_step)
         return None
 
     def test_step(self, batch, batch_idx):
-        if self.args.msssim:
+        if self.args.ssim:
             similarity_metrics = 'MS-SSIM'
         else:
             similarity_metrics = 'PSNR'
@@ -289,16 +299,16 @@ class VCT(CompressesModel):
         for m in metrics_name:
             metrics[m] = []
 
+        dataset_name, seq_name, batch, frame_id_start = batch
+
         os.makedirs(self.args.save_dir + f'/{seq_name}/gt_frame', exist_ok=True)
         os.makedirs(self.args.save_dir + f'/{seq_name}/rec_frame', exist_ok=True)
-
-        dataset_name, seq_name, batch, frame_id_start = batch
 
         seq_name, dataset_name = seq_name[0], dataset_name[0]
 
         gop_size = batch.size(1)
 
-        height, width = batch_frame.size()[3:]
+        height, width = batch.size()[3:]
 
         log_list = []
 
@@ -306,16 +316,25 @@ class VCT(CompressesModel):
         align = Alignment()
         
         for frame_idx in range(gop_size):
-            TO_VISUALIZE = frame_idx < 8
+            TO_VISUALIZE = False and frame_idx < 8
 
             coding_frame = batch[:, frame_idx]
+
+            if self.args.verbose and frame_idx > 0:
+                def dummy_cstr(f):
+                    return{
+                        'coding_frame': torch.ones(f).cuda(),
+                        'frame_idx': frame_idx
+                    }
+                macs, params = get_model_complexity_info(self, tuple(align.align(coding_frame).shape), input_constructor=dummy_cstr)
+                print(macs)
             info = self(align.align(coding_frame), frame_idx)
 
             rec_frame = align.resume(info['rec_frame']).clamp(0, 1)
             rate = estimate_bpp(info['likelihoods'], input=rec_frame).mean().item()
 
             mse = self.criterion(rec_frame, coding_frame).mean().item()
-            if self.args.msssim:
+            if self.args.ssim:
                 similarity = mse
             else:
                 similarity = mse2psnr(mse)
@@ -422,37 +441,28 @@ class VCT(CompressesModel):
     def configure_optimizers(self):
         # REQUIRED
         # can return multiple optimizers and learning_rate schedulers
-        current_epoch = self.trainer.current_epoch
+        current_step = self.trainer.global_step
         
         optimizer = optim.Adam([dict(params=self.main_parameters(), lr=self.args.lr),
                                 dict(params=self.aux_parameters(), lr=self.args.lr * 10)])
-
-        schedulers = []
-        if current_epoch < phase['trainAE']:
-            warmup = 1
-            if current_epoch < 1: # Warmup
-                schedulers.append(optim.lr_scheduler.ConstantLR(optimizer, factor=1, total_iters=warmup))
-            schedulers.append(optim.lr_scheduler.LinearLR(optimizer,
-                                                          start_factor=1, end_factor=0.1,
-                                                          total_iters=(phase['trainAE'] - warmup - current_epoch)))
-        if current_epoch < phase['trainPrior']:
-            warmup = 1
-            if current_epoch < phase['trainAE'] + warmup: # Warmup
-                schedulers.append(optim.lr_scheduler.ConstantLR(optimizer, factor=1, total_iters=warmup))
-            schedulers.append(optim.lr_scheduler.LinearLR(optimizer,
-                                                          start_factor=1, end_factor=0.1,
-                                                          total_iters=(phase['trainPrior'] - warmup - current_epoch)))
-        if current_epoch < phase['trainAll']:
-            warmup = 1
-            if current_epoch < phase['trainPrior'] + warmup: # Warmup
-                schedulers.append(optim.lr_scheduler.ConstantLR(optimizer, factor=0.25, total_iters=warmup))
-            schedulers.append(optim.lr_scheduler.LinearLR(optimizer,
-                                                          start_factor=0.25, end_factor=0.1,
-                                                          total_iters=(phase['trainAll'] - warmup - current_epoch)))
-
+        
+        def linearLRwithWarmup(current_step):
+            warmup = 10000
+            if current_step < phase['trainAE']:
+                if current_step < warmup:
+                    return 1.
+                return 0.1*(current_step - warmup)/(phase['trainAE'] - warmup)
+            elif current_step < phase['trainPrior']:
+                if current_step < phase['trainAE'] + warmup:
+                    return 1.
+                return 0.1*(current_step - phase['trainAE'] - warmup)/(phase['trainPrior'] - phase['trainAE'] - warmup)
+            elif current_step < phase['trainAll']:
+                if current_step < phase['trainPrior'] + warmup:
+                    return 1.
+                return 0.4*(current_step - phase['trainPrior'] - warmup)/(phase['trainAll'] - phase['trainPrior'] - warmup)
             
-        scheduler = optim.lr_scheduler.SequentialLR(optimizer, lr_step, lr_gamma)
-
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[linearLRwithWarmup, lambda a: 1.])
+ 
         return [optimizer], [scheduler]
 
     def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_idx, optimizer_closure=None, on_tpu=None,
@@ -483,14 +493,14 @@ class VCT(CompressesModel):
             self.val_dataset = VideoTestData(os.path.join(self.args.dataset_path, "video_dataset/"), self.args.lmda, sequence=('B'), GOP=32)
         elif stage == 'test':
             self.test_dataset = VideoTestData(os.path.join(self.args.dataset_path, "video_dataset/"), self.args.lmda,
-                                              sequence=('U', 'B', 'M', 'K'), GOP=self.args.test_GOP)
+                                              sequence=('B'), GOP=self.args.test_GOP)
         else:
             raise NotImplementedError
 
     def train_dataloader(self):
         # REQUIRED
         train_loader = DataLoader(self.train_dataset,
-                                  batch_size=self.args.batch_size,
+                                  batch_size=self.args.batch_size//self.args.gpus,
                                   num_workers=self.args.num_workers,
                                   shuffle=True)
         return train_loader
@@ -556,6 +566,7 @@ if __name__ == '__main__':
     parser.add_argument('--test_GOP', type=int, default=32)
     parser.add_argument('--experiment_name', type=str, default='basic')
     parser.add_argument('--project_name', type=str, default="CANFVC")
+    parser.add_argument('--codec_conf', type=str, default=None)
 
     parser.set_defaults(gpus=1)
 
@@ -566,7 +577,13 @@ if __name__ == '__main__':
     project_name = args.project_name
 
     torch.backends.cudnn.deterministic = True
-  
+
+    # Config codecs
+    assert not (args.codec_conf is None)
+    codec_cfg = yaml.safe_load(open(args.codec_conf, 'r'))
+    codec_arch = __CODER_TYPES__[codec_cfg['model_architecture']]
+    codec = codec_arch(**codec_cfg['model_params'])
+
     checkpoint_callback = ModelCheckpoint(
         save_top_k=-1,
         save_last=True,
@@ -577,7 +594,6 @@ if __name__ == '__main__':
         mode='min',
         prefix=''
     )
-
 
     db = None
     if args.gpus > 1:
@@ -622,13 +638,15 @@ if __name__ == '__main__':
             checkpoint = torch.load(os.path.join(args.log_path, project_name, args.restore_key, "checkpoints", f"epoch={epoch_num}.ckpt"),
                                     map_location=(lambda storage, loc: storage))
         
+        model = VCT(args, codec).cuda()
+        model.load_state_dict(checkpoint['state_dict'], strict=True)
+        
         if args.restore == 'resume':
             trainer.current_epoch = epoch_num + 1
+            trainer.global_step = trainer.current_epoch*args.batch_size*len(models.train_dataset) + 1
         else:
             trainer.current_epoch = epoch_num + 1
-        
-        model = VCT(args).cuda()
-        model.load_state_dict(checkpoint['state_dict'], strict=True)
+            trainer.global_step = trainer.current_epoch*args.batch_size*len(models.train_dataset) + 1
         
     else:
         trainer = Trainer.from_argparse_args(args,
@@ -641,10 +659,15 @@ if __name__ == '__main__':
                                              num_sanity_val_steps=0,
                                              terminate_on_nan=True)
     
-        model = VCT().cuda()
+        model = VCT(args, codec).cuda()
 
     if args.verbose:
         summary(model)
+        summary(model.codec.analysis)
+        summary(model.codec.synthesis)
+        summary(model.codec.temporal_prior)
+        summary(model.codec.hyper_analysis)
+        summary(model.codec.hyper_synthesis)
 
     if args.test:
         trainer.test(model)

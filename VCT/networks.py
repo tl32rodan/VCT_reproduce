@@ -231,9 +231,9 @@ class ResidualBlock(nn.Sequential):
 
     def __init__(self, num_filters):
         super(ResidualBlock, self).__init__(
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
             Conv2d(num_filters, num_filters, 3, stride=1),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
             Conv2d(num_filters, num_filters, 3, stride=1),
         )
 
@@ -243,43 +243,44 @@ class ResidualBlock(nn.Sequential):
 
 class VCTAnalysisTransform(nn.Sequential):
     def __init__(self, in_channels, num_features, num_filters, kernel_size):
-        super(GoogleAnalysisTransform, self).__init__(
+        super(VCTAnalysisTransform, self).__init__(
             Conv2d(in_channels, num_filters, kernel_size, stride=2),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
             Conv2d(num_filters, num_filters, kernel_size, stride=2),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
             Conv2d(num_filters, num_filters, kernel_size, stride=2),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
             Conv2d(num_filters, num_features, kernel_size, stride=2)
         )
 
 
 class VCTSynthesisTransform(nn.Sequential):
     def __init__(self, out_channels, num_features, num_filters, kernel_size):
-        super(GoogleSynthesisTransform, self).__init__(
+        super(VCTSynthesisTransform, self).__init__(
             ResidualBlock(num_features),
             ResidualBlock(num_features),
             ResidualBlock(num_features),
             ResidualBlock(num_features),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
             ConvTranspose2d(num_features, num_filters, kernel_size, stride=2),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
             ResidualBlock(num_filters),
             ResidualBlock(num_filters),
             ConvTranspose2d(num_filters, num_filters, kernel_size, stride=2),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
             ResidualBlock(num_filters),
             ResidualBlock(num_filters),
             ConvTranspose2d(num_filters, num_filters, kernel_size, stride=2),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
             ConvTranspose2d(num_filters, out_channels, kernel_size, stride=2)
         )
 
 
 class TransformerEntropyModel(nn.Module):
     def __init__(self, w_c=4, w_p=8, d_C=192, d_T=768):
-        super(self, TransformerEntropyModel).__init__()
+        super(TransformerEntropyModel, self).__init__()
 
+        self.d_T = d_T
         self.trans_sep = Encoder(d_word_vec=d_T, n_layers=6, n_head=16,
                                  d_k=64, d_v=64, d_model=d_T, d_inner=2048,
                                  use_proj=True, d_src_vocab=d_C,
@@ -292,10 +293,10 @@ class TransformerEntropyModel(nn.Module):
 
         self.trans_cur = Decoder(d_word_vec=d_T, n_layers=5, n_head=16,
                                  d_k=64, d_v=64, d_model=d_T, d_inner=2048,
-                                 use_proj=True, d_src_vocab=d_C,
-                                 dropout=0.1, n_position=w_c ** 2, scale_emb=False)
+                                 use_proj=True, d_trg_vocab=d_C,
+                                 dropout=0.1, n_position=w_c ** 2 + 1, scale_emb=False)
 
-        self.start_token = nn.Parameter((1, 1, d_C))
+        self.start_token = nn.Parameter(torch.Tensor(1, 1, d_C))
         
         # Mean & scale prediction
         self.trg_word_prj = nn.Linear(d_T, d_C * 2, bias=False)
@@ -309,23 +310,26 @@ class TransformerEntropyModel(nn.Module):
         
         enc_outputs = []
         for src_seq in src_seqs:
-            enc_output, *_ = self.trans_sep(src_seq, None)
+            #enc_output, *_ = self.trans_sep(src_seq, None)
+            enc_output = self.trans_sep(src_seq, None)
             enc_outputs.append(enc_output)
 
         enc_outputs = torch.cat(enc_outputs, dim=1)
 
-        z_joint = self.trans_joint(enc_outputs)
+        z_joint = self.trans_joint(enc_outputs, None)
         
         # Add start token
         start_token = torch.cat([self.start_token]*trg_seq.size(0), dim=0)
         trg_seq = torch.cat([start_token, trg_seq], dim=1)
 
-        mask = get_subsequent_mask(trg_seq)
-        dec_output, *_ = self.decoder(trg_seq, mask, z_joint, None)
+        mask = get_subsequent_mask(trg_seq).to(trg_seq.device)
+
+        #dec_output, *_ = self.trans_cur(trg_seq, mask, z_joint, None)
+        dec_output = self.trans_cur(trg_seq, mask, z_joint, None)
         condition = self.trg_word_prj(dec_output)
         
         # Multiply (\sqrt{d_model} ^ -1) to linear projection output
-        condition *= self.d_model ** -0.5
+        condition *= self.d_T ** -0.5
 
         return condition
 
@@ -399,14 +403,16 @@ class TransformerPriorCoder(CompressesModel):
         features = self.analysis(input)
         
         if use_prior == 'temp':
-            cur_tokens = feat2token(features)
-            prev_tokens = [feat2token(feat) for feat in prev_features]
+            cur_token = feat2token(features, block_size=(4, 4))
+            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4)) for feat in prev_features]
 
-            condition = self.temporal_prior(prev_tokens, cur_token)
+            condition = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
 
             mean, scale = condition.chunk(2, dim=2)
 
-            condition = torch.cat([token2feat(mean), token2feat(scale)], dim=1)
+            condition = torch.cat([token2feat(mean, block_size=(4, 4), feat_size=prev_features[0].size()),
+                                   token2feat(scale, block_size=(4, 4), feat_size=prev_features[0].size())],
+                                  dim=1)
         else:
             hyperpriors = self.hyper_analysis(features)
 

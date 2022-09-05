@@ -2,7 +2,8 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from transformer.Layers import EncoderLayer, DecoderLayer
+import math
+#from transformer.Layers import EncoderLayer, DecoderLayer
 
 
 __author__ = "Yu-Hsiang Huang"
@@ -13,45 +14,70 @@ def get_pad_mask(seq, pad_idx):
 
 def get_subsequent_mask(seq):
     ''' For masking out the subsequent info. '''
-    sz_b, len_s, _ = seq.size()
-    subsequent_mask = (1 - torch.triu(
-        torch.ones((1, len_s, len_s), device=seq.device), diagonal=1)).bool()
-    return subsequent_mask
+    len_s, sz, _ = seq.size()
+    #sz_b, len_s, _ = seq.size()
+    #subsequent_mask = (1 - torch.triu(
+    #    torch.ones((1, len_s, len_s), device=seq.device), diagonal=1)).bool()
+    #return subsequent_mask
+    return torch.triu(torch.full((sz, sz), float('-inf')), diagonal=1)
 
 
+# class PositionalEncoding(nn.Module):
+
+#     def __init__(self, d_hid, n_position=200):
+#         super(PositionalEncoding, self).__init__()
+
+#         # Not a parameter
+#         self.register_buffer('pos_table', self._get_sinusoid_encoding_table(n_position, d_hid))
+
+#     def _get_sinusoid_encoding_table(self, n_position, d_hid):
+#         ''' Sinusoid position encoding table '''
+#         # TODO: make it with torch instead of numpy
+
+#         def get_position_angle_vec(position):
+#             return [position / np.power(10000, 2 * (hid_j // 2) / d_hid) for hid_j in range(d_hid)]
+
+#         sinusoid_table = np.array([get_position_angle_vec(pos_i) for pos_i in range(n_position)])
+#         sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])  # dim 2i
+#         sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])  # dim 2i+1
+
+#         return torch.FloatTensor(sinusoid_table).unsqueeze(0)
+
+#     def forward(self, x):
+#         return x + self.pos_table[:, :x.size(1)].clone().detach()
+    
+    
 class PositionalEncoding(nn.Module):
 
-    def __init__(self, d_hid, n_position=200):
-        super(PositionalEncoding, self).__init__()
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
 
-        # Not a parameter
-        self.register_buffer('pos_table', self._get_sinusoid_encoding_table(n_position, d_hid))
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
 
-    def _get_sinusoid_encoding_table(self, n_position, d_hid):
-        ''' Sinusoid position encoding table '''
-        # TODO: make it with torch instead of numpy
-
-        def get_position_angle_vec(position):
-            return [position / np.power(10000, 2 * (hid_j // 2) / d_hid) for hid_j in range(d_hid)]
-
-        sinusoid_table = np.array([get_position_angle_vec(pos_i) for pos_i in range(n_position)])
-        sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])  # dim 2i
-        sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])  # dim 2i+1
-
-        return torch.FloatTensor(sinusoid_table).unsqueeze(0)
-
-    def forward(self, x):
-        return x + self.pos_table[:, :x.size(1)].clone().detach()
-
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor, shape [seq_len, batch_size, embedding_dim]
+        """
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
 
 class Encoder(nn.Module):
     ''' A encoder model with self attention mechanism. '''
 
     def __init__(
             self, d_word_vec, n_layers, n_head,
-            d_k, d_v, d_model, d_inner,
+            d_k, d_v, # Useless when using torch.nn implementation
+            d_model, d_inner,
             use_proj=True, d_src_vocab=None,
-            dropout=0.1, n_position=200, scale_emb=False):
+            n_position=200, # Useless too
+            dropout=0.1, scale_emb=False):
 
         super().__init__()
         
@@ -59,33 +85,37 @@ class Encoder(nn.Module):
             assert type(d_src_vocab) == int, 'ValueError: \`d_src_vocab\` should be specified when \`use_proj\` is \`True\`'
 
         self.proj = nn.Linear(d_src_vocab, d_word_vec, bias=True) if use_proj else nn.Identity()
-        self.position_enc = PositionalEncoding(d_word_vec, n_position=n_position)
-        self.dropout = nn.Dropout(p=dropout)
+        #self.position_enc = PositionalEncoding(d_word_vec, n_position=n_position, dropout=dropout)
+        self.position_enc = PositionalEncoding(d_word_vec, dropout=dropout)
+        #self.dropout = nn.Dropout(p=dropout)
         self.layer_stack = nn.ModuleList([
-            EncoderLayer(d_model, d_inner, n_head, d_k, d_v, dropout=dropout)
+            nn.TransformerEncoderLayer(d_model, n_head, dim_feedforward=d_inner, dropout=dropout)
             for _ in range(n_layers)])
         self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
         self.scale_emb = scale_emb
         self.d_model = d_model
 
-    def forward(self, src_seq, src_mask, return_attns=False):
+    #def forward(self, src_seq, src_mask, return_attns=False):
+    def forward(self, src_seq, src_mask):
 
         enc_slf_attn_list = []
 
         # -- Forward
-        enc_output = self.proj(src_seq)
+        enc_output = self.proj(src_seq).transpose(0, 1) # In NLP, data should be (seq_len, batch_size, ...)
         if self.scale_emb:
             enc_output *= self.d_model ** 0.5
-        enc_output = self.dropout(self.position_enc(enc_output))
+        enc_output = self.position_enc(enc_output)
         enc_output = self.layer_norm(enc_output)
 
         for enc_layer in self.layer_stack:
-            enc_output, enc_slf_attn = enc_layer(enc_output, slf_attn_mask=src_mask)
-            enc_slf_attn_list += [enc_slf_attn] if return_attns else []
+            #enc_output, enc_slf_attn = enc_layer(enc_output, slf_attn_mask=src_mask)
+            #enc_slf_attn_list += [enc_slf_attn] if return_attns else []
+            enc_output = enc_layer(enc_output, src_mask=src_mask)
 
-        if return_attns:
-            return enc_output, enc_slf_attn_list
-        return enc_output,
+        #if return_attns:
+        #    return enc_output, enc_slf_attn_list
+        #return enc_output,
+        return enc_output.transpose(0, 1)
 
 
 class Decoder(nn.Module):
@@ -93,9 +123,11 @@ class Decoder(nn.Module):
 
     def __init__(
             self, d_word_vec, n_layers, n_head,
-            d_k, d_v, d_model, d_inner,
+            d_k, d_v, # Useless when using torch.nn implementation
+            d_model, d_inner,
             use_proj=True, d_trg_vocab=None, 
-            dropout=0.1, n_position=200, scale_emb=False):
+            n_position=200, # Useless too
+            dropout=0.1, scale_emb=False):
 
         super().__init__()
 
@@ -103,35 +135,40 @@ class Decoder(nn.Module):
             assert type(d_trg_vocab) == int, 'ValueError: \`d_trg_vocab\` should be specified when \`use_proj\` is \`True\`'
 
         self.proj = nn.Linear(d_trg_vocab, d_word_vec, bias=True) if use_proj else nn.Identity()
-        self.position_enc = PositionalEncoding(d_word_vec, n_position=n_position)
-        self.dropout = nn.Dropout(p=dropout)
+        self.position_enc = PositionalEncoding(d_word_vec, dropout=dropout)
+        #self.position_enc = PositionalEncoding(d_word_vec, n_position=n_position)
+        #self.dropout = nn.Dropout(p=dropout)
         self.layer_stack = nn.ModuleList([
-            DecoderLayer(d_model, d_inner, n_head, d_k, d_v, dropout=dropout)
+            nn.TransformerDecoderLayer(d_model, n_head, dim_feedforward=d_inner, dropout=dropout)
             for _ in range(n_layers)])
         self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
         self.scale_emb = scale_emb
         self.d_model = d_model
 
-    def forward(self, trg_seq, trg_mask, enc_output, src_mask, return_attns=False):
+    #def forward(self, trg_seq, trg_mask, enc_output, src_mask, return_attns=False):
+    def forward(self, trg_seq, trg_mask, enc_output, src_mask):
 
-        dec_slf_attn_list, dec_enc_attn_list = [], []
+        #dec_slf_attn_list, dec_enc_attn_list = [], []
 
         # -- Forward
-        dec_output = self.proj(trg_seq)
+        enc_output = enc_output.transpose(0, 1) # In NLP, data should be (seq_len, batch_size, ...)
+        dec_output = self.proj(trg_seq).transpose(0, 1)
         if self.scale_emb:
             dec_output *= self.d_model ** 0.5
-        dec_output = self.dropout(self.position_enc(dec_output))
+        dec_output = self.position_enc(dec_output)
         dec_output = self.layer_norm(dec_output)
 
         for dec_layer in self.layer_stack:
-            dec_output, dec_slf_attn, dec_enc_attn = dec_layer(
-                dec_output, enc_output, slf_attn_mask=trg_mask, dec_enc_attn_mask=src_mask)
-            dec_slf_attn_list += [dec_slf_attn] if return_attns else []
-            dec_enc_attn_list += [dec_enc_attn] if return_attns else []
+            #dec_output, dec_slf_attn, dec_enc_attn = dec_layer(
+            #    dec_output, enc_output, slf_attn_mask=trg_mask, dec_enc_attn_mask=src_mask)
+            #dec_slf_attn_list += [dec_slf_attn] if return_attns else []
+            #dec_enc_attn_list += [dec_enc_attn] if return_attns else []
+            dec_output = dec_layer(dec_output, enc_output, tgt_mask=trg_mask, memory_mask=src_mask)
 
-        if return_attns:
-            return dec_output, dec_slf_attn_list, dec_enc_attn_list
-        return dec_output,
+        #if return_attns:
+        #    return dec_output, dec_slf_attn_list, dec_enc_attn_list
+        #return dec_output,
+        return dec_output.transpose(0, 1)
 
 
 class Transformer(nn.Module):

@@ -1,0 +1,12 @@
+---
+model_architecture: TransformerPriorCoder
+
+model_params:
+    num_filters: 192
+    num_features: 192
+    num_hyperpriors: 192
+    in_channels: 3
+    out_channels: 3
+    kernel_size: 5
+    condition: Gaussian
+    quant_mode: noise
