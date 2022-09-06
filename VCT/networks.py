@@ -374,7 +374,7 @@ class TransformerPriorCoder(CompressesModel):
         
         if use_prior == 'temp':
             cur_token = feat2token(features, block_size=(4, 4))
-            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4)) for feat in prev_features]
+            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
 
             condition = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
 
@@ -422,7 +422,7 @@ class TransformerPriorCoderSideInfoAtEncode(TransformerPriorCoder):
         
         if use_prior == 'temp':
             cur_token = feat2token(features, block_size=(4, 4))
-            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4)) for feat in prev_features]
+            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
 
             ### --- Difference --- ###
             # Perform hyperprior coding when use_prior=='temp' as well
@@ -430,7 +430,7 @@ class TransformerPriorCoderSideInfoAtEncode(TransformerPriorCoder):
             hyperpriors = self.hyper_analysis(features)
             z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
 
-            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1))]
+            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1), padding=[2]*4)]
             prev_features.append(z_tokens)
             ### --- End Difference --- ###
 
@@ -479,7 +479,7 @@ class TransformerPriorCoderSideInfoAtDecode(TransformerPriorCoder):
         
         if use_prior == 'temp':
             cur_token = feat2token(features, block_size=(4, 4))
-            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4)) for feat in prev_features]
+            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
 
             ### --- Difference --- ###
             # Perform hyperprior coding when use_prior=='temp' as well
@@ -487,7 +487,7 @@ class TransformerPriorCoderSideInfoAtDecode(TransformerPriorCoder):
             hyperpriors = self.hyper_analysis(features)
             z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
 
-            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1))]
+            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1), padding=[2]*4)]
             cur_tokens = torch.cat([cur_tokens, z_tokens], dim=1)
             ### --- End Difference --- ###
 

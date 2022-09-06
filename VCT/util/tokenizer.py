@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
-def feat2token(feat, block_size=(4, 4), stride=None):
+def feat2token(feat, block_size=(4, 4), stride=None, padding=None):
     """
        Tokenize a 4D feature map into 3D sequences.
        Each sequence is treated as a new batch containing multiple tokens. 
@@ -18,7 +18,10 @@ def feat2token(feat, block_size=(4, 4), stride=None):
     assert (not h % stride[0]) and (not w % stride[1]), ValueError
     
     num_tokens = (h // stride[0], w // stride[1])
-    padding = [(block_size[0] - 1) // 2] * 2 + [(block_size[1] - 1) // 2] * 2
+    if padding is None:
+        padding = [0, 0, 0, ]
+    else:
+        padding = padding
     feat = F.pad(feat, padding, 'constant', 0)
 
     tokens = []
