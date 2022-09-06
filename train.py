@@ -104,10 +104,10 @@ class VCT(CompressesModel):
                self.optimizers().state[param] = {} # remove all state (step, exp_avg, exp_avg_sg)
 
     def training_step(self, batch, batch_idx):
-        step = self.global_step
+        epoch = self.current_epoch
         batch = batch.cuda()
         
-        if step < phase['trainAE']:
+        if epoch < phase['trainAE']:
             coding_frame = batch[:, 0]
             info = self(coding_frame, 0)
 
@@ -124,7 +124,7 @@ class VCT(CompressesModel):
                     'train/PSNR': mse2psnr(distortion.mean().item()), 
                     'train/rate': rate.mean().item(), 
                    }
-        elif step < phase['trainPrior']:
+        elif epoch < phase['trainPrior']:
             # Disable AE
             self.disable_modules([self.codec.analysis, self.codec.synthesis])
 
@@ -148,7 +148,7 @@ class VCT(CompressesModel):
                     'train/rate': loss.item(),
                    }
 
-        elif step < phase['trainAll']:
+        elif epoch < phase['trainAll']:
             self.requires_grad_(True)
             # Prepare latents of first 2 frames
             with torch.no_grad():
@@ -289,7 +289,6 @@ class VCT(CompressesModel):
             logs['val/'+dataset_name+' rate'] = np.mean(rd['rate'])
 
         self.log_dict(logs)
-        print("\nCurrent step =", self.global_step)
         return None
 
     def test_step(self, batch, batch_idx):
@@ -451,7 +450,7 @@ class VCT(CompressesModel):
                                 dict(params=self.aux_parameters(), lr=self.args.lr * 10)])
         
         def linearLRwithWarmup(current_epoch):
-            warmup = 10000
+            warmup = 1
             if current_epoch < phase['trainAE']:
                 if current_epoch < warmup:
                     return 1.
@@ -487,8 +486,6 @@ class VCT(CompressesModel):
         self.logger.experiment.log_parameters(self.args)
 
         if stage == 'fit':
-            trainer.global_step =self.current_epoch*args.batch_size*len(model.train_dataset) + 1
-            print("Current step: ", )
             transformer = transforms.Compose([
                 transforms.RandomCrop(self.args.patch_size),
                 transforms.RandomHorizontalFlip(),
