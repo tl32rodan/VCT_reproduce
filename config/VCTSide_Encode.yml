@@ -1,5 +1,5 @@
 ---
-model_architecture: TransformerPriorCoder
+model_architecture: TransformerPriorCoderSideInfoAtEncode
 
 model_params:
     num_filters: 192
