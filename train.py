@@ -30,9 +30,9 @@ from VCT.util.tools import Alignment
 #phase = {'trainAE': 100000, # 100k
 #         'trainPrior': 150000, # 50k
 #         'trainAll': 175000} # 25K
-phase = {'trainAE': 100000, # 100k
-         'trainPrior': 150000, # 50k
-         'trainAll': 175000} # 25K
+phase = {'trainAE': 20,
+         'trainPrior': 30,
+         'trainAll': 35}
 
 
 class CompressesModel(LightningModule):
@@ -445,25 +445,25 @@ class VCT(CompressesModel):
     def configure_optimizers(self):
         # REQUIRED
         # can return multiple optimizers and learning_rate schedulers
-        current_step = self.trainer.global_step
+        current_epoch = self.trainer.current_epoch
         
         optimizer = optim.Adam([dict(params=self.main_parameters(), lr=self.args.lr),
                                 dict(params=self.aux_parameters(), lr=self.args.lr * 10)])
         
-        def linearLRwithWarmup(current_step):
+        def linearLRwithWarmup(current_epoch):
             warmup = 10000
-            if current_step < phase['trainAE']:
-                if current_step < warmup:
+            if current_epoch < phase['trainAE']:
+                if current_epoch < warmup:
                     return 1.
-                return 0.1*(current_step - warmup)/(phase['trainAE'] - warmup)
-            elif current_step < phase['trainPrior']:
-                if current_step < phase['trainAE'] + warmup:
+                return 0.1*(current_epoch - warmup)/(phase['trainAE'] - warmup)
+            elif current_epoch < phase['trainPrior']:
+                if current_epoch < phase['trainAE'] + warmup:
                     return 1.
-                return 0.1*(current_step - phase['trainAE'] - warmup)/(phase['trainPrior'] - phase['trainAE'] - warmup)
-            elif current_step < phase['trainAll']:
-                if current_step < phase['trainPrior'] + warmup:
+                return 0.1*(current_epoch - phase['trainAE'] - warmup)/(phase['trainPrior'] - phase['trainAE'] - warmup)
+            elif current_epoch < phase['trainAll']:
+                if current_epoch < phase['trainPrior'] + warmup:
                     return 1.
-                return 0.4*(current_step - phase['trainPrior'] - warmup)/(phase['trainAll'] - phase['trainPrior'] - warmup)
+                return 0.4*(current_epoch - phase['trainPrior'] - warmup)/(phase['trainAll'] - phase['trainPrior'] - warmup)
             
         scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[linearLRwithWarmup, lambda a: 1.])
  
@@ -487,6 +487,8 @@ class VCT(CompressesModel):
         self.logger.experiment.log_parameters(self.args)
 
         if stage == 'fit':
+            trainer.global_step =self.current_epoch*args.batch_size*len(model.train_dataset) + 1
+            print("Current step: ", )
             transformer = transforms.Compose([
                 transforms.RandomCrop(self.args.patch_size),
                 transforms.RandomHorizontalFlip(),
@@ -647,10 +649,8 @@ if __name__ == '__main__':
         
         if args.restore == 'resume':
             trainer.current_epoch = epoch_num + 1
-            trainer.global_step = trainer.current_epoch*args.batch_size*len(models.train_dataset) + 1
         else:
             trainer.current_epoch = epoch_num + 1
-            trainer.global_step = trainer.current_epoch*args.batch_size*len(models.train_dataset) + 1
         
     else:
         trainer = Trainer.from_argparse_args(args,
