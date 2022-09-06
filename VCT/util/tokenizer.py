@@ -19,7 +19,7 @@ def feat2token(feat, block_size=(4, 4), stride=None, padding=None):
     
     num_tokens = (h // stride[0], w // stride[1])
     if padding is None:
-        padding = [0, 0, 0, ]
+        padding = [0, 0, 0, 0]
     else:
         padding = padding
     feat = F.pad(feat, padding, 'constant', 0)
