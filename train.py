@@ -27,9 +27,12 @@ from VCT.util.ssim import MS_SSIM
 from VCT.util.vision import PlotFlow, PlotHeatMap, save_image
 from VCT.util.tools import Alignment
 
-phase = {'trainAE': 2000000, # 2M
-         'trainPrior': 3000000, # 1M
-         'trainAll': 3250000} # 250K
+#phase = {'trainAE': 100000, # 100k
+#         'trainPrior': 150000, # 50k
+#         'trainAll': 175000} # 25K
+phase = {'trainAE': 100000, # 100k
+         'trainPrior': 150000, # 50k
+         'trainAll': 175000} # 25K
 
 
 class CompressesModel(LightningModule):
@@ -233,9 +236,10 @@ class VCT(CompressesModel):
                 similarity = mse
             else:
                 similarity = mse2psnr(mse)
-
-            upload_img(coding_frame.cpu().numpy()[0], f'{seq_name}_{epoch}_gt_frame_{frame_idx}.png', grid=False)
-            upload_img(rec_frame.cpu().numpy()[0], seq_name + '_{:d}_rec_frame_{:d}_{:.3f}.png'.format(epoch, frame_idx, similarity), grid=False)
+            
+            if frame_idx < 3:
+                upload_img(coding_frame.cpu().numpy()[0], f'{seq_name}_{epoch}_gt_frame_{frame_idx+frame_id}.png', grid=False)
+                upload_img(rec_frame.cpu().numpy()[0], seq_name + '_{:d}_rec_frame_{:d}_{:.3f}.png'.format(epoch, frame_idx+frame_id, similarity), grid=False)
 
             loss = self.args.lmda * mse + rate
 
@@ -655,7 +659,7 @@ if __name__ == '__main__':
                                              distributed_backend=db,
                                              logger=comet_logger,
                                              default_root_dir=args.log_path,
-                                             check_val_every_n_epoch=3,
+                                             check_val_every_n_epoch=1,
                                              num_sanity_val_steps=0,
                                              terminate_on_nan=True)
     
