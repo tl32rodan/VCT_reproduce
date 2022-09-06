@@ -281,20 +281,17 @@ class TransformerEntropyModel(nn.Module):
         super(TransformerEntropyModel, self).__init__()
 
         self.d_T = d_T
-        self.trans_sep = Encoder(d_word_vec=d_T, n_layers=6, n_head=16,
-                                 d_k=64, d_v=64, d_model=d_T, d_inner=2048,
+        self.trans_sep = Encoder(d_word_vec=d_T, n_layers=6, n_head=16, d_model=d_T, d_inner=2048,
                                  use_proj=True, d_src_vocab=d_C,
-                                 dropout=0.1, n_position=w_p ** 2, scale_emb=False)
+                                 dropout=0.1, scale_emb=False)
 
-        self.trans_joint = Encoder(d_word_vec=d_T, n_layers=4, n_head=16,
-                                   d_k=64, d_v=64, d_model=d_T, d_inner=2048,
+        self.trans_joint = Encoder(d_word_vec=d_T, n_layers=4, n_head=16, d_model=d_T, d_inner=2048,
                                    use_proj=False, d_src_vocab=None, # Projection is not needed; it only use (temporal) embedding
-                                   dropout=0.1, n_position=2 * w_p ** 2, scale_emb=False)
+                                   dropout=0.1, scale_emb=False)
 
-        self.trans_cur = Decoder(d_word_vec=d_T, n_layers=5, n_head=16,
-                                 d_k=64, d_v=64, d_model=d_T, d_inner=2048,
+        self.trans_cur = Decoder(d_word_vec=d_T, n_layers=5, n_head=16, d_model=d_T, d_inner=2048,
                                  use_proj=True, d_trg_vocab=d_C,
-                                 dropout=0.1, n_position=w_c ** 2 + 1, scale_emb=False)
+                                 dropout=0.1, scale_emb=False)
 
         self.start_token = nn.Parameter(torch.Tensor(1, 1, d_C))
         
@@ -310,7 +307,6 @@ class TransformerEntropyModel(nn.Module):
         
         enc_outputs = []
         for src_seq in src_seqs:
-            #enc_output, *_ = self.trans_sep(src_seq, None)
             enc_output = self.trans_sep(src_seq, None)
             enc_outputs.append(enc_output)
 
@@ -324,7 +320,6 @@ class TransformerEntropyModel(nn.Module):
 
         mask = get_subsequent_mask(trg_seq).to(trg_seq.device)
 
-        #dec_output, *_ = self.trans_cur(trg_seq, mask, z_joint, None)
         dec_output = self.trans_cur(trg_seq, mask, z_joint, None)
         condition = self.trg_word_prj(dec_output)
         
