@@ -12,10 +12,17 @@ __author__ = "Peng-Yu Chen"
 def get_pad_mask(seq, pad_idx):
     return (seq != pad_idx).unsqueeze(-2)
 
-def get_subsequent_mask(seq):
-    ''' For masking out the subsequent info. '''
+def get_subsequent_mask(seq, sz_limit=0):
+    ''' For masking out the subsequent info. 
+        * args:
+            * limit: Leave visible for those locating at (sz-sz_limit <= (token position) < sz)
+    '''
     len_s, sz, _ = seq.size()
-    return torch.triu(torch.full((sz, sz), float('-inf')), diagonal=1)
+    mask = torch.zeros((sz, sz))
+    _sz = sz - sz_limit
+    mask[:_sz, :_sz] = torch.triu(torch.full((_sz, _sz), float('-inf')), diagonal=1)
+
+    return mask
 
 
 class PositionalEncoding(nn.Module):
@@ -38,6 +45,7 @@ class PositionalEncoding(nn.Module):
         """
         x = x + self.pe[:x.size(0)]
         return self.dropout(x)
+
 
 class Encoder(nn.Module):
     ''' A encoder model with self attention mechanism. '''

@@ -17,7 +17,7 @@ def feat2token(feat, block_size=(4, 4), stride=None):
     b, c, h, w = feat.size()
     assert (not h % stride[0]) and (not w % stride[1]), ValueError
     
-    num_tokens = (h // stride[0], w // stride[1])   
+    num_tokens = (h // stride[0], w // stride[1])
     padding = [(block_size[0]-stride[0])//2]*2 + [(block_size[1]-stride[1])//2]*2
     feat = F.pad(feat, padding, 'constant', 0)
 

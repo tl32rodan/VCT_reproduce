@@ -302,7 +302,7 @@ class TransformerEntropyModel(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p) 
 
-    def forward(self, src_seqs, trg_seq):
+    def forward(self, src_seqs, trg_seq, sz_limit=0):
         assert isinstance(src_seqs, list), "`src_seqs` should be a list"
         
         enc_outputs = []
@@ -318,7 +318,7 @@ class TransformerEntropyModel(nn.Module):
         start_token = torch.cat([self.start_token]*trg_seq.size(0), dim=0)
         trg_seq = torch.cat([start_token, trg_seq], dim=1)
 
-        mask = get_subsequent_mask(trg_seq).to(trg_seq.device)
+        mask = get_subsequent_mask(trg_seq, sz_limit).to(trg_seq.device)
 
         dec_output = self.trans_cur(trg_seq, mask, z_joint, None)
         condition = self.trg_word_prj(dec_output)
@@ -334,6 +334,7 @@ class TransformerPriorCoder(CompressesModel):
 
     def __init__(self, num_filters, num_features, num_hyperpriors,
                  in_channels=3, out_channels=3, kernel_size=5, 
+                 w_c=4, w_p=8, d_C=192, d_T=192
                  condition='Gaussian', quant_mode='noise'):
 
         super(TransformerPriorCoder, self).__init__()
@@ -344,52 +345,26 @@ class TransformerPriorCoder(CompressesModel):
         self.analysis = VCTAnalysisTransform(in_channels, num_features, num_filters, kernel_size)
         self.synthesis = VCTSynthesisTransform(out_channels, num_features, num_filters, kernel_size)
 
-        self.temporal_prior = TransformerEntropyModel()
+        self.temporal_prior = TransformerEntropyModel(w_c, w_p, d_C, d_T)
 
         self.hyper_analysis = GoogleHyperAnalysisTransform(num_features, num_filters, num_hyperpriors)
         self.hyper_synthesis = GoogleHyperSynthesisTransform(num_features*self.conditional_bottleneck.condition_size, num_filters, num_hyperpriors)
 
+        # Latnet Residual Pretictor
+        self.LRP = nn.Sequential([
+            Conv2d(d_T, num_features, 1, stride=1),
+            nn.LeakyReLU(0.1),
+            ResidualBlock(num_features),
+        ])
+
         self.divisor = 64
 
-    #TODO
     def compress(self, input, return_hat=False):
-        features = self.analysis(input)
+        #TODO
 
-        hyperpriors = self.hyper_analysis(
-            features.abs() if self.use_abs else features)
-
-        side_stream, z_hat = self.entropy_bottleneck.compress(
-            hyperpriors, return_sym=True)
-
-        condition = self.hyper_synthesis(z_hat)
-
-        ret = self.conditional_bottleneck.compress(
-            features, condition=condition, return_sym=return_hat)
-
-        if return_hat:
-            stream, y_hat = ret
-            x_hat = self.synthesis(y_hat)
-            return x_hat, [stream, side_stream], [features.size(), hyperpriors.size()]
-        else:
-            stream = ret
-            return [stream, side_stream], [features.size(), hyperpriors.size()]
-
-    #TODO
     def decompress(self, strings, shape):
-        stream, side_stream = strings
-        y_shape, z_shape = shape
-
-        z_hat = self.entropy_bottleneck.decompress(side_stream, z_shape)
-
-        condition = self.hyper_synthesis(z_hat)
-
-        y_hat = self.conditional_bottleneck.decompress(
-            stream, y_shape, condition=condition)
-
-        reconstructed = self.synthesis(y_hat)
-
-        return reconstructed
-
+        #TODO
+    
     def forward(self, input, use_prior='temp', prev_features=None):
         assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
         if use_prior == 'temp':
@@ -406,8 +381,7 @@ class TransformerPriorCoder(CompressesModel):
             mean, scale = condition.chunk(2, dim=2)
 
             condition = torch.cat([token2feat(mean, block_size=(4, 4), feat_size=prev_features[0].size()),
-                                   token2feat(scale, block_size=(4, 4), feat_size=prev_features[0].size())],
-                                  dim=1)
+                                   token2feat(scale, block_size=(4, 4), feat_size=prev_features[0].size())], dim=1)
         else:
             hyperpriors = self.hyper_analysis(features)
 
@@ -417,6 +391,9 @@ class TransformerPriorCoder(CompressesModel):
 
         y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
 
+        if use_prior == 'temp':
+            y_tilde += self.LRP(y_tilde)
+
         reconstructed = self.synthesis(y_tilde)
 
         if use_prior == 'temp':
@@ -425,7 +402,123 @@ class TransformerPriorCoder(CompressesModel):
             return reconstructed, (y_likelihood, z_likelihood), y_tilde
 
 
+class TransformerPriorCoderSideInfoAtEncode(TransformerPriorCoder):
+    """
+        Transformer-based Entropy Coder that takes 2 previously decoded latents as temporal condition
+        Side information (hyperprior/low-resolution) latent is used in Transformer's encoder:
+            * sr_z = self.trains_sep(self.hyper_synthesis)
+    """
+
+    def __init__(self, **kwargs):
+
+        super(TransformerPriorCoderSideInfoAtEncode, self).__init__(**kwargs)
+
+    def forward(self, input, use_prior='temp', prev_features=None):
+        assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
+        if use_prior == 'temp':
+            assert not (prev_features is None) and isinstance(prev_features, list), ValueError
+
+        features = self.analysis(input)
+        
+        if use_prior == 'temp':
+            cur_token = feat2token(features, block_size=(4, 4))
+            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4)) for feat in prev_features]
+
+            ### --- Difference --- ###
+            # Perform hyperprior coding when use_prior=='temp' as well
+            # Directly extracts blocks from z_tilde and treat it as prev_features
+            hyperpriors = self.hyper_analysis(features)
+            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
+
+            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1)]
+            prev_features.append(z_tokens)
+            ### --- End Difference --- ###
+
+            condition = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
+
+            mean, scale = condition.chunk(2, dim=2)
+
+            condition = torch.cat([token2feat(mean, block_size=(4, 4), feat_size=prev_features[0].size()),
+                                   token2feat(scale, block_size=(4, 4), feat_size=prev_features[0].size())], dim=1)
+        else:
+            hyperpriors = self.hyper_analysis(features)
+
+            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
+
+            condition = self.hyper_synthesis(z_tilde)
+
+        y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
+
+        if use_prior == 'temp':
+            y_tilde += self.LRP(y_tilde)
+
+        reconstructed = self.synthesis(y_tilde)
+
+        ### --- Difference --- ###
+        return reconstructed, (y_likelihood, z_likelihood), y_tilde
+        ### --- End Difference --- ###
+
+
+class TransformerPriorCoderSideInfoAtDecode(TransformerPriorCoder):
+    """
+        Transformer-based Entropy Coder that takes 2 previously decoded latents as temporal condition
+        Side information (hyperprior/low-resolution) latent is used in Transformer's encoder:
+            * sr_z = self.trains_sep(self.hyper_synthesis)
+    """
+
+    def __init__(self, **kwargs):
+
+        super(TransformerPriorCoderSideInfo, self).__init__(**kwargs)
+
+    def forward(self, input, use_prior='temp', prev_features=None):
+        assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
+        if use_prior == 'temp':
+            assert not (prev_features is None) and isinstance(prev_features, list), ValueError
+
+        features = self.analysis(input)
+        
+        if use_prior == 'temp':
+            cur_token = feat2token(features, block_size=(4, 4))
+            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4)) for feat in prev_features]
+
+            ### --- Difference --- ###
+            # Perform hyperprior coding when use_prior=='temp' as well
+            # Directly extracts blocks from z_tilde and treat it as part of current tokens
+            hyperpriors = self.hyper_analysis(features)
+            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
+
+            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1)]
+            cur_tokens = torch.cat([cur_tokens, z_tokens], dim=1)
+            ### --- End Difference --- ###
+
+            condition = self.temporal_prior(prev_tokens, cur_token, sz_limit=z_tokens.size(1))[:, :-1, :]
+
+            mean, scale = condition.chunk(2, dim=2)
+
+            condition = torch.cat([token2feat(mean, block_size=(4, 4), feat_size=prev_features[0].size()),
+                                   token2feat(scale, block_size=(4, 4), feat_size=prev_features[0].size())], dim=1)
+        else:
+            hyperpriors = self.hyper_analysis(features)
+
+            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
+
+            condition = self.hyper_synthesis(z_tilde)
+
+        if use_prior == 'temp':
+            y_tilde += self.LRP(y_tilde)
+
+        y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
+
+        reconstructed = self.synthesis(y_tilde)
+
+        ### --- Difference --- ###
+        return reconstructed, (y_likelihood, z_likelihood), y_tilde
+        ### --- End Difference --- ###
+
+
+
 __CODER_TYPES__ = {
                    "GoogleHyperPriorCoder": GoogleHyperPriorCoder,
                    "TransformerPriorCoder": TransformerPriorCoder,
+                   "TransformerPriorCoderSideInfo": TransformerPriorCoderSideInfo,
                   }

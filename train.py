@@ -565,7 +565,7 @@ if __name__ == '__main__':
     parser = VCT.add_model_specific_args(parser)
 
     # training specific
-    parser.add_argument('--restore', type=str, choices=['none', 'resume', 'load'], default='none')
+    parser.add_argument('--restore', type=str, choices=['none', 'resume', 'load', 'custom'], default='none')
     parser.add_argument('--restore_key', type=str, default=None)
     parser.add_argument('--restore_epoch', type=int, default=49)
     parser.add_argument('--test', "-T", action="store_true")
@@ -624,8 +624,10 @@ if __name__ == '__main__':
     #              No new experiments will be created in comet.ml. 
     #   *'load': Load an existing experiment and creat a new experiment. 
     #            Usually used when some intermediate phases should be conducted again.
+    #   *'custom': Customize a new experiment from one or multiple experiments. 
+    #              Usually used when you want to change architecture or load specific modules from several experiments.
     ########
-    
+
     if args.restore == 'resume' or args.restore == 'load':
         trainer = Trainer.from_argparse_args(args,
                                              checkpoint_callback=checkpoint_callback,
@@ -651,6 +653,36 @@ if __name__ == '__main__':
             trainer.current_epoch = epoch_num + 1
         else:
             trainer.current_epoch = epoch_num + 1
+   
+    if args.restore == 'custom':
+        trainer = Trainer.from_argparse_args(args,
+                                             checkpoint_callback=checkpoint_callback,
+                                             gpus=args.gpus,
+                                             distributed_backend=db,
+                                             logger=comet_logger,
+                                             default_root_dir=args.log_path,
+                                             check_val_every_n_epoch=1,
+                                             num_sanity_val_steps=0,
+                                             terminate_on_nan=True)
+
+        epoch_num = args.restore_epoch
+        if args.restore_key is None:
+            raise ValueError
+        else:  # When prev_key is specified in args
+            checkpoint = torch.load(os.path.join(args.log_path, project_name, args.restore_key, "checkpoints", f"epoch={epoch_num}.ckpt"),
+                                    map_location=(lambda storage, loc: storage))
+        
+        from collections import OrderedDict
+        new_ckpt = OrderedDict()
+
+        for k, v in checkpoint['state_dict'].items():
+            if k.split('.')[0] != 'codec' or  k.split('.')[1] != 'temporal_prior':
+                new_ckpt[k] = v
+
+        model = VCT(args, codec).cuda()
+        model.load_state_dict(checkpoint['state_dict'], strict=True)
+        
+        trainer.current_epoch = epoch_num + 1
         
     else:
         trainer = Trainer.from_argparse_args(args,
