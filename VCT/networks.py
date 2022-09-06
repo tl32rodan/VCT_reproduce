@@ -334,7 +334,7 @@ class TransformerPriorCoder(CompressesModel):
 
     def __init__(self, num_filters, num_features, num_hyperpriors,
                  in_channels=3, out_channels=3, kernel_size=5, 
-                 w_c=4, w_p=8, d_C=192, d_T=192
+                 w_c=4, w_p=8, d_C=192, d_T=192,
                  condition='Gaussian', quant_mode='noise'):
 
         super(TransformerPriorCoder, self).__init__()
@@ -351,19 +351,19 @@ class TransformerPriorCoder(CompressesModel):
         self.hyper_synthesis = GoogleHyperSynthesisTransform(num_features*self.conditional_bottleneck.condition_size, num_filters, num_hyperpriors)
 
         # Latnet Residual Pretictor
-        self.LRP = nn.Sequential([
+        self.LRP = nn.Sequential(
             Conv2d(d_T, num_features, 1, stride=1),
             nn.LeakyReLU(0.1),
             ResidualBlock(num_features),
-        ])
+        )
 
         self.divisor = 64
 
     def compress(self, input, return_hat=False):
-        #TODO
+        pass
 
     def decompress(self, strings, shape):
-        #TODO
+        pass
     
     def forward(self, input, use_prior='temp', prev_features=None):
         assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
@@ -430,7 +430,7 @@ class TransformerPriorCoderSideInfoAtEncode(TransformerPriorCoder):
             hyperpriors = self.hyper_analysis(features)
             z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
 
-            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1)]
+            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1))]
             prev_features.append(z_tokens)
             ### --- End Difference --- ###
 
@@ -487,7 +487,7 @@ class TransformerPriorCoderSideInfoAtDecode(TransformerPriorCoder):
             hyperpriors = self.hyper_analysis(features)
             z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
 
-            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1)]
+            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1))]
             cur_tokens = torch.cat([cur_tokens, z_tokens], dim=1)
             ### --- End Difference --- ###
 
@@ -520,5 +520,6 @@ class TransformerPriorCoderSideInfoAtDecode(TransformerPriorCoder):
 __CODER_TYPES__ = {
                    "GoogleHyperPriorCoder": GoogleHyperPriorCoder,
                    "TransformerPriorCoder": TransformerPriorCoder,
-                   "TransformerPriorCoderSideInfo": TransformerPriorCoderSideInfo,
+                   "TransformerPriorCoderSideInfoAtEncode": TransformerPriorCoderSideInfoAtEncode,
+                   "TransformerPriorCoderSideInfoAtDecode": TransformerPriorCoderSideInfoAtDecode,
                   }

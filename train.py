@@ -695,13 +695,13 @@ if __name__ == '__main__':
         model = VCT(args, codec).cuda()
 
     if args.verbose:
-        summary(model)
-        summary(model.codec.analysis)
-        summary(model.codec.synthesis)
+        #summary(model)
+        #summary(model.codec.analysis)
+        #summary(model.codec.synthesis)
         summary(model.codec.temporal_prior)
-        summary(model.codec.temporal_prior.trans_sep)
-        summary(model.codec.temporal_prior.trans_joint)
-        summary(model.codec.temporal_prior.trans_cur)
+        #summary(model.codec.temporal_prior.trans_sep)
+        #summary(model.codec.temporal_prior.trans_joint)
+        #summary(model.codec.temporal_prior.trans_cur)
 
     if args.test:
         trainer.test(model)
