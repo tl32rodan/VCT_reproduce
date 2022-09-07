@@ -281,15 +281,15 @@ class TransformerEntropyModel(nn.Module):
         super(TransformerEntropyModel, self).__init__()
 
         self.d_T = d_T
-        self.trans_sep = Encoder(d_word_vec=d_T, n_layers=6, n_head=16, d_model=d_T, d_inner=2048,
+        self.trans_sep = Encoder(d_word_vec=d_T, n_layers=6, n_head=16, d_model=d_T, d_inner=d_T,
                                  use_proj=True, d_src_vocab=d_C if d_src_vocab is None else d_src_vocab,
                                  dropout=0.1, scale_emb=False)
 
-        self.trans_joint = Encoder(d_word_vec=d_T, n_layers=4, n_head=16, d_model=d_T, d_inner=2048,
+        self.trans_joint = Encoder(d_word_vec=d_T, n_layers=4, n_head=16, d_model=d_T, d_inner=d_T,
                                    use_proj=False, d_src_vocab=None, # Projection is not needed; it only use (temporal) embedding
                                    dropout=0.1, scale_emb=False)
 
-        self.trans_cur = Decoder(d_word_vec=d_T, n_layers=5, n_head=16, d_model=d_T, d_inner=2048,
+        self.trans_cur = Decoder(d_word_vec=d_T, n_layers=5, n_head=16, d_model=d_T, d_inner=d_T,
                                  use_proj=True, d_trg_vocab=d_C if d_trg_vocab is None else d_trg_vocab,
                                  dropout=0.1, scale_emb=False)
 

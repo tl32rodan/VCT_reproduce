@@ -30,9 +30,9 @@ from VCT.util.tools import Alignment
 #phase = {'trainAE': 100000, # 100k
 #         'trainPrior': 150000, # 50k
 #         'trainAll': 175000} # 25K
-phase = {'trainAE': 20,
-         'trainPrior': 30,
-         'trainAll': 35}
+phase = {'trainAE': 30,
+         'trainPrior': 45,
+         'trainAll': 55}
 
 
 class CompressesModel(LightningModule):
@@ -651,7 +651,7 @@ if __name__ == '__main__':
         else:
             trainer.current_epoch = epoch_num + 1
    
-    if args.restore == 'custom':
+    elif args.restore == 'custom':
         trainer = Trainer.from_argparse_args(args,
                                              checkpoint_callback=checkpoint_callback,
                                              gpus=args.gpus,
@@ -677,7 +677,7 @@ if __name__ == '__main__':
                 new_ckpt[k] = v
 
         model = VCT(args, codec).cuda()
-        model.load_state_dict(checkpoint['state_dict'], strict=True)
+        model.load_state_dict(new_ckpt, strict=False)
         
         trainer.current_epoch = epoch_num + 1
         
@@ -699,9 +699,9 @@ if __name__ == '__main__':
         #summary(model.codec.analysis)
         #summary(model.codec.synthesis)
         summary(model.codec.temporal_prior)
-        #summary(model.codec.temporal_prior.trans_sep)
-        #summary(model.codec.temporal_prior.trans_joint)
-        #summary(model.codec.temporal_prior.trans_cur)
+        summary(model.codec.temporal_prior.trans_sep)
+        summary(model.codec.temporal_prior.trans_joint)
+        summary(model.codec.temporal_prior.trans_cur)
 
     if args.test:
         trainer.test(model)
