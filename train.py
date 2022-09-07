@@ -74,14 +74,14 @@ class VCT(CompressesModel):
         self.args = args
         self.criterion = nn.MSELoss(reduction='none') if not self.args.ssim else MS_SSIM(data_range=1.).cuda()
         self.codec = codec
-        self.latent_buffer = None
+        self.latent_buffer = list()
 
     def load_args(self, args):
         self.args = args
 
     def forward(self, coding_frame, frame_idx=0):
         if frame_idx == 0:
-            self.latent_buffer = list()
+            self.latent_buffer = []
             reconstructed, likelihoods, latent = self.codec(coding_frame, 'hyper')
 
             # For first P-frame, 2 latents are needed so it needs to be duplicated
@@ -89,8 +89,8 @@ class VCT(CompressesModel):
             self.latent_buffer.append(latent)
         else:
             reconstructed, likelihoods, latent = self.codec(coding_frame, 'temp', self.latent_buffer)
-            self.latent_buffer.pop(0)
-            self.latent_buffer.append(latent)
+
+            self.latent_buffer = [self.latent_buffer[1], latent]
             
         return {
                 'rec_frame': reconstructed, 

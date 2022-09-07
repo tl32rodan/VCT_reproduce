@@ -277,12 +277,12 @@ class VCTSynthesisTransform(nn.Sequential):
 
 
 class TransformerEntropyModel(nn.Module):
-    def __init__(self, w_c=4, w_p=8, d_C=192, d_T=192):
+    def __init__(self, w_c=4, w_p=8, d_C=192, d_T=192, d_src_vocab=None, d_trg_vocab=None):
         super(TransformerEntropyModel, self).__init__()
 
         self.d_T = d_T
         self.trans_sep = Encoder(d_word_vec=d_T, n_layers=6, n_head=16, d_model=d_T, d_inner=2048,
-                                 use_proj=True, d_src_vocab=d_C,
+                                 use_proj=True, d_src_vocab=d_C if d_src_vocab is None else d_src_vocab,
                                  dropout=0.1, scale_emb=False)
 
         self.trans_joint = Encoder(d_word_vec=d_T, n_layers=4, n_head=16, d_model=d_T, d_inner=2048,
@@ -290,19 +290,13 @@ class TransformerEntropyModel(nn.Module):
                                    dropout=0.1, scale_emb=False)
 
         self.trans_cur = Decoder(d_word_vec=d_T, n_layers=5, n_head=16, d_model=d_T, d_inner=2048,
-                                 use_proj=True, d_trg_vocab=d_C,
+                                 use_proj=True, d_trg_vocab=d_C if d_trg_vocab is None else d_trg_vocab,
                                  dropout=0.1, scale_emb=False)
 
         self.start_token = nn.Parameter(torch.Tensor(1, 1, d_C))
         
-        # Mean & scale prediction
-        self.trg_word_prj = nn.Linear(d_T, d_C * 2, bias=False)
 
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p) 
-
-    def forward(self, src_seqs, trg_seq, sz_limit=0):
+    def forward(self, src_seqs, trg_seq, sz_limit=0, trg_pred=None):
         assert isinstance(src_seqs, list), "`src_seqs` should be a list"
         
         enc_outputs = []
@@ -317,16 +311,15 @@ class TransformerEntropyModel(nn.Module):
         # Add start token
         start_token = torch.cat([self.start_token]*trg_seq.size(0), dim=0)
         trg_seq = torch.cat([start_token, trg_seq], dim=1)
+        if not (trg_pred is None):
+            trg_pred = torch.cat([trg_pred, start_token], dim=1)
+            trg_seq = torch.cat([trg_seq, trg_pred], dim=2)
 
         mask = get_subsequent_mask(trg_seq, sz_limit).to(trg_seq.device)
 
-        dec_output = self.trans_cur(trg_seq, mask, z_joint, None)
-        condition = self.trg_word_prj(dec_output)
+        z_cur = self.trans_cur(trg_seq, mask, z_joint, None)
         
-        # Multiply (\sqrt{d_model} ^ -1) to linear projection output
-        condition *= self.d_T ** -0.5
-
-        return condition
+        return z_cur
 
 
 class TransformerPriorCoder(CompressesModel):
@@ -335,9 +328,13 @@ class TransformerPriorCoder(CompressesModel):
     def __init__(self, num_filters, num_features, num_hyperpriors,
                  in_channels=3, out_channels=3, kernel_size=5, 
                  w_c=4, w_p=8, d_C=192, d_T=192,
+                 d_src_vocab=None, d_trg_vocab=None,
                  condition='Gaussian', quant_mode='noise'):
 
         super(TransformerPriorCoder, self).__init__()
+        
+        self.d_C = d_C
+        self.d_T = d_T
 
         self.entropy_bottleneck = EntropyBottleneck(num_hyperpriors, quant_mode=quant_mode)
         self.conditional_bottleneck = __CONDITIONS__[condition](use_mean=True, quant_mode=quant_mode)
@@ -345,10 +342,13 @@ class TransformerPriorCoder(CompressesModel):
         self.analysis = VCTAnalysisTransform(in_channels, num_features, num_filters, kernel_size)
         self.synthesis = VCTSynthesisTransform(out_channels, num_features, num_filters, kernel_size)
 
-        self.temporal_prior = TransformerEntropyModel(w_c, w_p, d_C, d_T)
+        self.temporal_prior = TransformerEntropyModel(w_c, w_p, d_C, d_T, d_src_vocab, d_trg_vocab)
 
         self.hyper_analysis = GoogleHyperAnalysisTransform(num_features, num_filters, num_hyperpriors)
         self.hyper_synthesis = GoogleHyperSynthesisTransform(num_features*self.conditional_bottleneck.condition_size, num_filters, num_hyperpriors)
+
+        # Mean & scale prediction
+        self.trg_word_prj = nn.Linear(d_T, d_C * 2, bias=False)
 
         # Latnet Residual Pretictor
         self.LRP = nn.Sequential(
@@ -358,6 +358,10 @@ class TransformerPriorCoder(CompressesModel):
         )
 
         self.divisor = 64
+
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p) 
 
     def compress(self, input, return_hat=False):
         pass
@@ -376,7 +380,12 @@ class TransformerPriorCoder(CompressesModel):
             cur_token = feat2token(features, block_size=(4, 4))
             prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
 
-            condition = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
+            z_cur = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
+
+            condition = self.trg_word_prj(z_cur)
+
+            # Multiply (\sqrt{d_model} ^ -1) to linear projection output
+            condition *= self.d_T ** -0.5
 
             mean, scale = condition.chunk(2, dim=2)
 
@@ -392,7 +401,9 @@ class TransformerPriorCoder(CompressesModel):
         y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
 
         if use_prior == 'temp':
-            y_tilde += self.LRP(y_tilde)
+            b, c, h, w = prev_features[0].size()
+            z_cur = token2feat(z_cur, block_size=(4, 4), feat_size=((b, self.d_T, h, w)))
+            y_tilde += self.LRP(z_cur)
 
         reconstructed = self.synthesis(y_tilde)
 
@@ -410,7 +421,6 @@ class TransformerPriorCoderSideInfoAtEncode(TransformerPriorCoder):
     """
 
     def __init__(self, **kwargs):
-
         super(TransformerPriorCoderSideInfoAtEncode, self).__init__(**kwargs)
 
     def forward(self, input, use_prior='temp', prev_features=None):
@@ -430,11 +440,18 @@ class TransformerPriorCoderSideInfoAtEncode(TransformerPriorCoder):
             hyperpriors = self.hyper_analysis(features)
             z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
 
-            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1), padding=[2]*4)]
-            prev_features.append(z_tokens)
+            z_token = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1), padding=[2]*4)]
+            prev_features.append(z_token)
             ### --- End Difference --- ###
 
-            condition = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
+            z_cur = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
+
+            condition = self.trg_word_prj(z_cur)
+
+            # Multiply (\sqrt{d_model} ^ -1) to linear projection output
+            condition *= self.d_T ** -0.5
+
+            #condition = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
 
             mean, scale = condition.chunk(2, dim=2)
 
@@ -450,7 +467,9 @@ class TransformerPriorCoderSideInfoAtEncode(TransformerPriorCoder):
         y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
 
         if use_prior == 'temp':
-            y_tilde += self.LRP(y_tilde)
+            b, c, h, w = prev_features[0].size()
+            z_cur = token2feat(z_cur, block_size=(4, 4), feat_size=((b, self.d_T, h, w)))
+            y_tilde += self.LRP(z_cur)
 
         reconstructed = self.synthesis(y_tilde)
 
@@ -462,13 +481,11 @@ class TransformerPriorCoderSideInfoAtEncode(TransformerPriorCoder):
 class TransformerPriorCoderSideInfoAtDecode(TransformerPriorCoder):
     """
         Transformer-based Entropy Coder that takes 2 previously decoded latents as temporal condition
-        Side information (hyperprior/low-resolution) latent is used in Transformer's encoder:
-            * sr_z = self.trains_sep(self.hyper_synthesis)
+        Side information (hyperprior/low-resolution) latent is used in Transformer's decoder
     """
 
     def __init__(self, **kwargs):
-
-        super(TransformerPriorCoderSideInfo, self).__init__(**kwargs)
+        super(TransformerPriorCoderSideInfoAtDecode, self).__init__(**kwargs)
 
     def forward(self, input, use_prior='temp', prev_features=None):
         assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
@@ -487,11 +504,16 @@ class TransformerPriorCoderSideInfoAtDecode(TransformerPriorCoder):
             hyperpriors = self.hyper_analysis(features)
             z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
 
-            z_tokens = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1), padding=[2]*4)]
-            cur_tokens = torch.cat([cur_tokens, z_tokens], dim=1)
+            z_token = feat2token(z_tilde, block_size=(4, 4), stride=(1, 1), padding=[2]*4)
+            cur_token = torch.cat([cur_token, z_token], dim=1)
             ### --- End Difference --- ###
 
-            condition = self.temporal_prior(prev_tokens, cur_token, sz_limit=z_tokens.size(1))[:, :-1, :]
+            z_cur = self.temporal_prior(prev_tokens, cur_token, sz_limit=z_token.size(1))[:, :-(1+z_token.size(1)), :]
+
+            condition = self.trg_word_prj(z_cur)
+
+            # Multiply (\sqrt{d_model} ^ -1) to linear projection output
+            condition *= self.d_T ** -0.5
 
             mean, scale = condition.chunk(2, dim=2)
 
@@ -504,10 +526,12 @@ class TransformerPriorCoderSideInfoAtDecode(TransformerPriorCoder):
 
             condition = self.hyper_synthesis(z_tilde)
 
-        if use_prior == 'temp':
-            y_tilde += self.LRP(y_tilde)
-
         y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
+
+        if use_prior == 'temp':
+            b, c, h, w = prev_features[0].size()
+            z_cur = token2feat(z_cur, block_size=(4, 4), feat_size=((b, self.d_T, h, w)))
+            y_tilde += self.LRP(z_cur)
 
         reconstructed = self.synthesis(y_tilde)
 
@@ -516,10 +540,71 @@ class TransformerPriorCoderSideInfoAtDecode(TransformerPriorCoder):
         ### --- End Difference --- ###
 
 
+class TransformerPriorCoderSideInfoAtDecodeConcat(TransformerPriorCoder):
+    """
+        Transformer-based Entropy Coder that takes 2 previously decoded latents as temporal condition
+        Side information (hyperprior/low-resolution) latent is used in Transformer's decoder
+    """
+
+    def __init__(self, **kwargs):
+        super(TransformerPriorCoderSideInfoAtDecodeConcat, self).__init__(**kwargs)
+
+    def forward(self, input, use_prior='temp', prev_features=None):
+        assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
+        if use_prior == 'temp':
+            assert not (prev_features is None) and isinstance(prev_features, list), ValueError
+
+        features = self.analysis(input)
+        
+        if use_prior == 'temp':
+            cur_token = feat2token(features, block_size=(4, 4))
+            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
+
+            ### --- Difference --- ###
+            # Perform hyperprior coding when use_prior=='temp' as well
+            # Directly extracts blocks from z_tilde and treat it as part of current tokens
+            hyperpriors = self.hyper_analysis(features)
+            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
+
+            z_token = feat2token(z_tilde, block_size=(4, 4), stride=(1, 1), padding=[2]*4)
+            ### --- End Difference --- ###
+
+            z_cur = self.temporal_prior(prev_tokens, cur_token, trg_pred=z_token)[:, :-1, :]
+
+            condition = self.trg_word_prj(z_cur)
+
+            # Multiply (\sqrt{d_model} ^ -1) to linear projection output
+            condition *= self.d_T ** -0.5
+
+            mean, scale = condition.chunk(2, dim=2)
+
+            condition = torch.cat([token2feat(mean, block_size=(4, 4), feat_size=prev_features[0].size()),
+                                   token2feat(scale, block_size=(4, 4), feat_size=prev_features[0].size())], dim=1)
+        else:
+            hyperpriors = self.hyper_analysis(features)
+
+            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
+
+            condition = self.hyper_synthesis(z_tilde)
+
+        y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
+
+        if use_prior == 'temp':
+            b, c, h, w = prev_features[0].size()
+            z_cur = token2feat(z_cur, block_size=(4, 4), feat_size=((b, self.d_T, h, w)))
+            y_tilde += self.LRP(z_cur)
+
+        reconstructed = self.synthesis(y_tilde)
+
+        ### --- Difference --- ###
+        return reconstructed, (y_likelihood, z_likelihood), y_tilde
+        ### --- End Difference --- ###
+
 
 __CODER_TYPES__ = {
                    "GoogleHyperPriorCoder": GoogleHyperPriorCoder,
                    "TransformerPriorCoder": TransformerPriorCoder,
                    "TransformerPriorCoderSideInfoAtEncode": TransformerPriorCoderSideInfoAtEncode,
                    "TransformerPriorCoderSideInfoAtDecode": TransformerPriorCoderSideInfoAtDecode,
+                   "TransformerPriorCoderSideInfoAtDecodeConcat": TransformerPriorCoderSideInfoAtDecodeConcat,
                   }
