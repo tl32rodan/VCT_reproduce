@@ -1,5 +1,5 @@
 ---
-model_architecture: TransformerPriorCoderSideInfoAtEncode
+model_architecture: TransformerPriorCoderSideInfo
 
 model_params:
     num_filters: 192
@@ -11,6 +11,8 @@ model_params:
     w_c: 4
     w_p: 8
     d_C: 192
-    d_T: 192
+    d_T: 768
+    d_inner: 2048
+    d_trg_vocab: 384
     condition: Gaussian
     quant_mode: noise

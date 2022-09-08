@@ -413,141 +413,15 @@ class TransformerPriorCoder(CompressesModel):
             return reconstructed, (y_likelihood, z_likelihood), y_tilde
 
 
-class TransformerPriorCoderSideInfoAtEncode(TransformerPriorCoder):
-    """
-        Transformer-based Entropy Coder that takes 2 previously decoded latents as temporal condition
-        Side information (hyperprior/low-resolution) latent is used in Transformer's encoder:
-            * sr_z = self.trains_sep(self.hyper_synthesis)
-    """
-
-    def __init__(self, **kwargs):
-        super(TransformerPriorCoderSideInfoAtEncode, self).__init__(**kwargs)
-
-    def forward(self, input, use_prior='temp', prev_features=None):
-        assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
-        if use_prior == 'temp':
-            assert not (prev_features is None) and isinstance(prev_features, list), ValueError
-
-        features = self.analysis(input)
-        
-        if use_prior == 'temp':
-            cur_token = feat2token(features, block_size=(4, 4))
-            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
-
-            ### --- Difference --- ###
-            # Perform hyperprior coding when use_prior=='temp' as well
-            # Directly extracts blocks from z_tilde and treat it as prev_features
-            hyperpriors = self.hyper_analysis(features)
-            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
-
-            z_token = [feat2token(z_tilde, block_size=(4, 4), stride=(1, 1), padding=[2]*4)]
-            prev_features.append(z_token)
-            ### --- End Difference --- ###
-
-            z_cur = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
-
-            condition = self.trg_word_prj(z_cur)
-
-            # Multiply (\sqrt{d_model} ^ -1) to linear projection output
-            condition *= self.d_T ** -0.5
-
-            #condition = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
-
-            mean, scale = condition.chunk(2, dim=2)
-
-            condition = torch.cat([token2feat(mean, block_size=(4, 4), feat_size=prev_features[0].size()),
-                                   token2feat(scale, block_size=(4, 4), feat_size=prev_features[0].size())], dim=1)
-        else:
-            hyperpriors = self.hyper_analysis(features)
-
-            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
-
-            condition = self.hyper_synthesis(z_tilde)
-
-        y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
-
-        if use_prior == 'temp':
-            b, c, h, w = prev_features[0].size()
-            z_cur = token2feat(z_cur, block_size=(4, 4), feat_size=((b, self.d_T, h, w)))
-            y_tilde += self.LRP(z_cur)
-
-        reconstructed = self.synthesis(y_tilde)
-
-        ### --- Difference --- ###
-        return reconstructed, (y_likelihood, z_likelihood), y_tilde
-        ### --- End Difference --- ###
-
-
-class TransformerPriorCoderSideInfoAtDecode(TransformerPriorCoder):
+class TransformerPriorCoderSideInfo(TransformerPriorCoder):
     """
         Transformer-based Entropy Coder that takes 2 previously decoded latents as temporal condition
         Side information (hyperprior/low-resolution) latent is used in Transformer's decoder
+        They will be concatenated with target tokens
     """
 
     def __init__(self, **kwargs):
-        super(TransformerPriorCoderSideInfoAtDecode, self).__init__(**kwargs)
-
-    def forward(self, input, use_prior='temp', prev_features=None):
-        assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
-        if use_prior == 'temp':
-            assert not (prev_features is None) and isinstance(prev_features, list), ValueError
-
-        features = self.analysis(input)
-        
-        if use_prior == 'temp':
-            cur_token = feat2token(features, block_size=(4, 4))
-            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
-
-            ### --- Difference --- ###
-            # Perform hyperprior coding when use_prior=='temp' as well
-            # Directly extracts blocks from z_tilde and treat it as part of current tokens
-            hyperpriors = self.hyper_analysis(features)
-            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
-
-            z_token = feat2token(z_tilde, block_size=(4, 4), stride=(1, 1), padding=[2]*4)
-            cur_token = torch.cat([cur_token, z_token], dim=1)
-            ### --- End Difference --- ###
-
-            z_cur = self.temporal_prior(prev_tokens, cur_token, sz_limit=z_token.size(1))[:, :-(1+z_token.size(1)), :]
-
-            condition = self.trg_word_prj(z_cur)
-
-            # Multiply (\sqrt{d_model} ^ -1) to linear projection output
-            condition *= self.d_T ** -0.5
-
-            mean, scale = condition.chunk(2, dim=2)
-
-            condition = torch.cat([token2feat(mean, block_size=(4, 4), feat_size=prev_features[0].size()),
-                                   token2feat(scale, block_size=(4, 4), feat_size=prev_features[0].size())], dim=1)
-        else:
-            hyperpriors = self.hyper_analysis(features)
-
-            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
-
-            condition = self.hyper_synthesis(z_tilde)
-
-        y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
-
-        if use_prior == 'temp':
-            b, c, h, w = prev_features[0].size()
-            z_cur = token2feat(z_cur, block_size=(4, 4), feat_size=((b, self.d_T, h, w)))
-            y_tilde += self.LRP(z_cur)
-
-        reconstructed = self.synthesis(y_tilde)
-
-        ### --- Difference --- ###
-        return reconstructed, (y_likelihood, z_likelihood), y_tilde
-        ### --- End Difference --- ###
-
-
-class TransformerPriorCoderSideInfoAtDecodeConcat(TransformerPriorCoder):
-    """
-        Transformer-based Entropy Coder that takes 2 previously decoded latents as temporal condition
-        Side information (hyperprior/low-resolution) latent is used in Transformer's decoder
-    """
-
-    def __init__(self, **kwargs):
-        super(TransformerPriorCoderSideInfoAtDecodeConcat, self).__init__(**kwargs)
+        super(TransformerPriorCoderSideInfo, self).__init__(**kwargs)
 
     def forward(self, input, use_prior='temp', prev_features=None):
         assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
@@ -604,7 +478,5 @@ class TransformerPriorCoderSideInfoAtDecodeConcat(TransformerPriorCoder):
 __CODER_TYPES__ = {
                    "GoogleHyperPriorCoder": GoogleHyperPriorCoder,
                    "TransformerPriorCoder": TransformerPriorCoder,
-                   "TransformerPriorCoderSideInfoAtEncode": TransformerPriorCoderSideInfoAtEncode,
-                   "TransformerPriorCoderSideInfoAtDecode": TransformerPriorCoderSideInfoAtDecode,
-                   "TransformerPriorCoderSideInfoAtDecodeConcat": TransformerPriorCoderSideInfoAtDecodeConcat,
+                   "TransformerPriorCoderSideInfo": TransformerPriorCoderSideInfo,
                   }
