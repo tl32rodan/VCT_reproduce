@@ -294,9 +294,9 @@ class TransformerEntropyModel(nn.Module):
                                  dropout=0.1, scale_emb=False)
 
         self.start_token = nn.Parameter(torch.Tensor(1, 1, d_C))
-        
-
-    def forward(self, src_seqs, trg_seq, sz_limit=0, trg_pred=None):
+       
+    def encode(self, src_seqs):
+        """Transformer encoder"""
         assert isinstance(src_seqs, list), "`src_seqs` should be a list"
         
         enc_outputs = []
@@ -306,19 +306,30 @@ class TransformerEntropyModel(nn.Module):
 
         enc_outputs = torch.cat(enc_outputs, dim=1)
 
-        z_joint = self.trans_joint(enc_outputs, None)
-        
+        enc_output = self.trans_joint(enc_outputs, None)
+
+        return enc_output
+       
+    def decode(self, trg_seq, enc_output, sz_limit=0):
+        """Transformer decoder"""
         # Add start token
         start_token = torch.cat([self.start_token]*trg_seq.size(0), dim=0)
         trg_seq = torch.cat([start_token, trg_seq], dim=1)
-        if not (trg_pred is None):
-            trg_pred = torch.cat([trg_pred, start_token], dim=1)
-            trg_seq = torch.cat([trg_seq, trg_pred], dim=2)
 
         mask = get_subsequent_mask(trg_seq, sz_limit).to(trg_seq.device)
 
-        z_cur = self.trans_cur(trg_seq, mask, z_joint, None)
+        dec_output = self.trans_cur(trg_seq, mask, enc_output, None)
         
+        return dec_output
+
+    def forward(self, src_seq, trg_seq, sz_limit=0):
+        z_joint = self.encode(src_seq)
+        
+        z_cur = self.decode(trg_seq, enc_output, sz_limit)
+        
+        # Ignore the last prediction
+        z_cur = z_cur[:, :-1, :]
+
         return z_cur
 
 
@@ -380,7 +391,7 @@ class TransformerPriorCoder(CompressesModel):
             cur_token = feat2token(features, block_size=(4, 4))
             prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
 
-            z_cur = self.temporal_prior(prev_tokens, cur_token)[:, :-1, :]
+            z_cur = self.temporal_prior(prev_tokens, cur_token)
 
             condition = self.trg_word_prj(z_cur)
 
@@ -394,7 +405,7 @@ class TransformerPriorCoder(CompressesModel):
         else:
             hyperpriors = self.hyper_analysis(features)
 
-            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
+            h_tilde, h_likelihood = self.entropy_bottleneck(hyperpriors)
 
             condition = self.hyper_synthesis(z_tilde)
 
@@ -410,7 +421,39 @@ class TransformerPriorCoder(CompressesModel):
         if use_prior == 'temp':
             return reconstructed, (y_likelihood, ), y_tilde
         else:
-            return reconstructed, (y_likelihood, z_likelihood), y_tilde
+            return reconstructed, (y_likelihood, h_likelihood), y_tilde
+
+
+class TransformerEntropyModelwithTargetPrediction(TransformerEntropyModel):
+    def __init__(self, **kwargs):
+        super(TransformerEntropyModelwithTargetPrediction, self).__init__()
+
+    def decode(self, trg_seq, enc_output, sz_limit=0):
+
+        dec_output = self.trans_cur(trg_seq, None, enc_output, None)
+        
+        return dec_output
+
+    def forward(self, src_seq, trg_seq, trg_pred, sz_limit=0):
+        z_joint = self.encode(src_seq)
+        
+        output = torch.zeros_like(trg_seq)
+        inputs = []
+        updated = trg_pred
+        inputs.append(torch.cat([updated, trg_pred], dim=2))
+        for i in range(1, trg_seq.size(1)):
+            updated[:, i, :] = trg_seq[:, i, :]
+            inputs.append(updated)
+
+        inputs = torch.cat(inputs, dim=0)
+
+        z_cur = self.decode(inputs, enc_output, sz_limit)
+        
+        bs = output.size(0)
+        for i in range(trg_seq.size(1)):
+            output[:,i: i+1, :] = z_cur[i*bs: (i+1)*bs, i: i+1, :]
+
+        return output
 
 
 class TransformerPriorCoderSideInfo(TransformerPriorCoder):
@@ -423,6 +466,8 @@ class TransformerPriorCoderSideInfo(TransformerPriorCoder):
     def __init__(self, **kwargs):
         super(TransformerPriorCoderSideInfo, self).__init__(**kwargs)
 
+        self.SR_h = GoogleHyperScaleSynthesisTransform(kwargs['num_features'], kwargs['num_filters'], kwargs['num_hyperpriors'])
+
     def forward(self, input, use_prior='temp', prev_features=None):
         assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
         if use_prior == 'temp':
@@ -431,19 +476,18 @@ class TransformerPriorCoderSideInfo(TransformerPriorCoder):
         features = self.analysis(input)
         
         if use_prior == 'temp':
-            cur_token = feat2token(features, block_size=(4, 4))
-            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
+            cur_token = feat2token(features, block_sihe=(4, 4))
+            prev_tokens = [feat2token(feat, block_sihe=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
 
-            ### --- Difference --- ###
             # Perform hyperprior coding when use_prior=='temp' as well
-            # Directly extracts blocks from z_tilde and treat it as part of current tokens
+            # Extracts blocks from super-resoluted h_tilde and treat it as part of current tokens
             hyperpriors = self.hyper_analysis(features)
-            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
+            h_tilde, h_likelihood = self.entropy_bottleneck(hyperpriors)
+            
+            sr_h = self.SR_h(h_tilde)
+            h_token = feat2token(sr_h, block_sihe=(4, 4))
 
-            z_token = feat2token(z_tilde, block_size=(4, 4), stride=(1, 1), padding=[2]*4)
-            ### --- End Difference --- ###
-
-            z_cur = self.temporal_prior(prev_tokens, cur_token, trg_pred=z_token)[:, :-1, :]
+            z_cur = self.temporal_prior(prev_tokens, cur_token, h_token)
 
             condition = self.trg_word_prj(z_cur)
 
@@ -457,9 +501,9 @@ class TransformerPriorCoderSideInfo(TransformerPriorCoder):
         else:
             hyperpriors = self.hyper_analysis(features)
 
-            z_tilde, z_likelihood = self.entropy_bottleneck(hyperpriors)
+            h_tilde, h_likelihood = self.entropy_bottleneck(hyperpriors)
 
-            condition = self.hyper_synthesis(z_tilde)
+            condition = self.hyper_synthesis(h_tilde)
 
         y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
 
@@ -470,9 +514,7 @@ class TransformerPriorCoderSideInfo(TransformerPriorCoder):
 
         reconstructed = self.synthesis(y_tilde)
 
-        ### --- Difference --- ###
-        return reconstructed, (y_likelihood, z_likelihood), y_tilde
-        ### --- End Difference --- ###
+        return reconstructed, (y_likelihood, h_likelihood), y_tilde
 
 
 __CODER_TYPES__ = {
