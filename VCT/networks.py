@@ -277,19 +277,19 @@ class VCTSynthesisTransform(nn.Sequential):
 
 
 class TransformerEntropyModel(nn.Module):
-    def __init__(self, w_c=4, w_p=8, d_C=192, d_T=192, d_src_vocab=None, d_trg_vocab=None):
+    def __init__(self, w_c=4, w_p=8, d_C=192, d_T=192, d_inner=2048, d_src_vocab=None, d_trg_vocab=None):
         super(TransformerEntropyModel, self).__init__()
 
         self.d_T = d_T
-        self.trans_sep = Encoder(d_word_vec=d_T, n_layers=6, n_head=16, d_model=d_T, d_inner=d_T,
+        self.trans_sep = Encoder(d_word_vec=d_T, n_layers=6, n_head=16, d_model=d_T, d_inner=d_inner,
                                  use_proj=True, d_src_vocab=d_C if d_src_vocab is None else d_src_vocab,
                                  dropout=0.1, scale_emb=False)
 
-        self.trans_joint = Encoder(d_word_vec=d_T, n_layers=4, n_head=16, d_model=d_T, d_inner=d_T,
+        self.trans_joint = Encoder(d_word_vec=d_T, n_layers=4, n_head=16, d_model=d_T, d_inner=d_inner,
                                    use_proj=False, d_src_vocab=None, # Projection is not needed; it only use (temporal) embedding
                                    dropout=0.1, scale_emb=False)
 
-        self.trans_cur = Decoder(d_word_vec=d_T, n_layers=5, n_head=16, d_model=d_T, d_inner=d_T,
+        self.trans_cur = Decoder(d_word_vec=d_T, n_layers=5, n_head=16, d_model=d_T, d_inner=d_inner,
                                  use_proj=True, d_trg_vocab=d_C if d_trg_vocab is None else d_trg_vocab,
                                  dropout=0.1, scale_emb=False)
 
@@ -327,7 +327,7 @@ class TransformerPriorCoder(CompressesModel):
 
     def __init__(self, num_filters, num_features, num_hyperpriors,
                  in_channels=3, out_channels=3, kernel_size=5, 
-                 w_c=4, w_p=8, d_C=192, d_T=192,
+                 w_c=4, w_p=8, d_C=192, d_T=192, d_inner=2048,
                  d_src_vocab=None, d_trg_vocab=None,
                  condition='Gaussian', quant_mode='noise'):
 
@@ -342,7 +342,7 @@ class TransformerPriorCoder(CompressesModel):
         self.analysis = VCTAnalysisTransform(in_channels, num_features, num_filters, kernel_size)
         self.synthesis = VCTSynthesisTransform(out_channels, num_features, num_filters, kernel_size)
 
-        self.temporal_prior = TransformerEntropyModel(w_c, w_p, d_C, d_T, d_src_vocab, d_trg_vocab)
+        self.temporal_prior = TransformerEntropyModel(w_c, w_p, d_C, d_T, d_inner, d_src_vocab, d_trg_vocab)
 
         self.hyper_analysis = GoogleHyperAnalysisTransform(num_features, num_filters, num_hyperpriors)
         self.hyper_synthesis = GoogleHyperSynthesisTransform(num_features*self.conditional_bottleneck.condition_size, num_filters, num_hyperpriors)
