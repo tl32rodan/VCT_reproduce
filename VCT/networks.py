@@ -164,13 +164,13 @@ class GoogleHyperScaleSynthesisTransform(nn.Sequential):
     def __init__(self, num_features, num_filters, num_hyperpriors):
         super(GoogleHyperScaleSynthesisTransform, self).__init__(
             ConvTranspose2d(num_hyperpriors, num_filters,
-                            kernel_size=5, stride=2, parameterizer=None),
+                            kernel_size=5, stride=2),
             nn.ReLU(inplace=True),
             ConvTranspose2d(num_filters, num_filters,
-                            kernel_size=5, stride=2, parameterizer=None),
+                            kernel_size=5, stride=2),
             nn.ReLU(inplace=True),
             ConvTranspose2d(num_filters, num_features,
-                            kernel_size=3, stride=1, parameterizer=None)
+                            kernel_size=3, stride=1)
         )
 
 
@@ -425,8 +425,8 @@ class TransformerPriorCoder(CompressesModel):
 
 
 class TransformerEntropyModelwithTargetPrediction(TransformerEntropyModel):
-    def __init__(self, **kwargs):
-        super(TransformerEntropyModelwithTargetPrediction, self).__init__()
+    def __init__(self, w_c=4, w_p=8, d_C=192, d_T=192, d_inner=2048, d_src_vocab=None, d_trg_vocab=None):
+        super(TransformerEntropyModelwithTargetPrediction, self).__init__(w_c, w_p, d_C, d_T, d_inner, d_src_vocab, d_trg_vocab)
 
     def decode(self, trg_seq, enc_output, sz_limit=0):
 
@@ -437,23 +437,20 @@ class TransformerEntropyModelwithTargetPrediction(TransformerEntropyModel):
     def forward(self, src_seq, trg_seq, trg_pred, sz_limit=0):
         z_joint = self.encode(src_seq)
         
-        output = torch.zeros_like(trg_seq)
         inputs = []
         updated = trg_pred
         inputs.append(torch.cat([updated, trg_pred], dim=2))
         for i in range(1, trg_seq.size(1)):
+            updated = updated.clone()
             updated[:, i, :] = trg_seq[:, i, :]
-            inputs.append(updated)
+            inputs.append(torch.cat([updated, trg_pred], dim=2))
 
         inputs = torch.cat(inputs, dim=0)
 
         z_cur = self.decode(inputs, z_joint, sz_limit)
         
-        bs = output.size(0)
-        for i in range(trg_seq.size(1)):
-            output[:,i: i+1, :] = z_cur[i*bs: (i+1)*bs, i: i+1, :]
 
-        return output
+        return z_cur
 
 
 class TransformerPriorCoderSideInfo(TransformerPriorCoder):
@@ -465,7 +462,14 @@ class TransformerPriorCoderSideInfo(TransformerPriorCoder):
 
     def __init__(self, **kwargs):
         super(TransformerPriorCoderSideInfo, self).__init__(**kwargs)
-
+        
+        self.temporal_prior = TransformerEntropyModelwithTargetPrediction(kwargs['w_c'], 
+                                                                          kwargs['w_p'],
+                                                                          kwargs['d_C'],
+                                                                          kwargs['d_T'], 
+                                                                          kwargs['d_inner'], 
+                                                                          kwargs['d_src_vocab'], 
+                                                                          kwargs['d_trg_vocab'])
         self.SR_h = GoogleHyperScaleSynthesisTransform(kwargs['num_features'], kwargs['num_filters'], kwargs['num_hyperpriors'])
 
     def forward(self, input, use_prior='temp', prev_features=None, enable_LRP=True):
@@ -476,8 +480,8 @@ class TransformerPriorCoderSideInfo(TransformerPriorCoder):
         features = self.analysis(input)
         
         if use_prior == 'temp':
-            cur_token = feat2token(features, block_sihe=(4, 4))
-            prev_tokens = [feat2token(feat, block_sihe=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
+            cur_token = feat2token(features, block_size=(4, 4))
+            prev_tokens = [feat2token(feat, block_size=(8, 8), stride=(4, 4), padding=[2]*4) for feat in prev_features]
 
             # Perform hyperprior coding when use_prior=='temp' as well
             # Extracts blocks from super-resoluted h_tilde and treat it as part of current tokens
@@ -485,11 +489,16 @@ class TransformerPriorCoderSideInfo(TransformerPriorCoder):
             h_tilde, h_likelihood = self.entropy_bottleneck(hyperpriors)
             
             sr_h = self.SR_h(h_tilde)
-            h_token = feat2token(sr_h, block_sihe=(4, 4))
+            h_token = feat2token(sr_h, block_size=(4, 4))
 
             z_cur = self.temporal_prior(prev_tokens, cur_token, h_token)
 
-            condition = self.trg_word_prj(z_cur)
+            bs, num_tokens, _ = cur_token.size()
+            output = torch.zeros_like(z_cur[:bs, :, :])
+            for i in range(num_tokens):
+                output[: ,i: i+1, :] = z_cur[i*bs: (i+1)*bs, i: i+1, :]
+
+            condition = self.trg_word_prj(output)
 
             # Multiply (\sqrt{d_model} ^ -1) to linear projection output
             condition *= self.d_T ** -0.5
