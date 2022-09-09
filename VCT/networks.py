@@ -507,7 +507,7 @@ class TransformerPriorCoderSideInfo(TransformerPriorCoder):
 
         y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
 
-        if enable_LRP:
+        if enable_LRP and use_prior == 'temp':
             b, c, h, w = features.size()
             z_cur = token2feat(z_cur, block_size=(4, 4), feat_size=((b, self.d_T, h, w)))
             y_tilde += self.LRP(z_cur)
