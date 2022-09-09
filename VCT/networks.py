@@ -380,7 +380,7 @@ class TransformerPriorCoder(CompressesModel):
     def decompress(self, strings, shape):
         pass
     
-    def forward(self, input, use_prior='temp', prev_features=None):
+    def forward(self, input, use_prior='temp', prev_features=None, enable_LRP=True):
         assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
         if use_prior == 'temp':
             assert not (prev_features is None) and isinstance(prev_features, list), ValueError
@@ -411,8 +411,8 @@ class TransformerPriorCoder(CompressesModel):
 
         y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
 
-        if use_prior == 'temp':
-            b, c, h, w = prev_features[0].size()
+        if enable_LRP:
+            b, c, h, w = features.size()
             z_cur = token2feat(z_cur, block_size=(4, 4), feat_size=((b, self.d_T, h, w)))
             y_tilde += self.LRP(z_cur)
 
@@ -468,7 +468,7 @@ class TransformerPriorCoderSideInfo(TransformerPriorCoder):
 
         self.SR_h = GoogleHyperScaleSynthesisTransform(kwargs['num_features'], kwargs['num_filters'], kwargs['num_hyperpriors'])
 
-    def forward(self, input, use_prior='temp', prev_features=None):
+    def forward(self, input, use_prior='temp', prev_features=None, enable_LRP=True):
         assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
         if use_prior == 'temp':
             assert not (prev_features is None) and isinstance(prev_features, list), ValueError
@@ -507,8 +507,8 @@ class TransformerPriorCoderSideInfo(TransformerPriorCoder):
 
         y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
 
-        if use_prior == 'temp':
-            b, c, h, w = prev_features[0].size()
+        if enable_LRP:
+            b, c, h, w = features.size()
             z_cur = token2feat(z_cur, block_size=(4, 4), feat_size=((b, self.d_T, h, w)))
             y_tilde += self.LRP(z_cur)
 

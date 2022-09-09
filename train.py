@@ -79,16 +79,16 @@ class VCT(CompressesModel):
     def load_args(self, args):
         self.args = args
 
-    def forward(self, coding_frame, frame_idx=0):
+    def forward(self, coding_frame, frame_idx=0, enable_LRP=True):
         if frame_idx == 0:
             self.latent_buffer = []
-            reconstructed, likelihoods, latent = self.codec(coding_frame, 'hyper')
+            reconstructed, likelihoods, latent = self.codec(coding_frame, 'hyper', enable_LRP=enable_LRP)
 
             # For first P-frame, 2 latents are needed so it needs to be duplicated
             self.latent_buffer.append(latent)
             self.latent_buffer.append(latent)
         else:
-            reconstructed, likelihoods, latent = self.codec(coding_frame, 'temp', self.latent_buffer)
+            reconstructed, likelihoods, latent = self.codec(coding_frame, 'temp', self.latent_buffer, enable_LRP=enable_LRP)
 
             self.latent_buffer = [self.latent_buffer[1], latent]
             
@@ -226,7 +226,7 @@ class VCT(CompressesModel):
 
         for frame_idx in range(gop_size):
             coding_frame = batch[:, frame_idx]
-            info = self(align.align(coding_frame), frame_idx)
+            info = self(align.align(coding_frame), frame_idx, enable_LRP=(self.current_epoch >= phase['trainPrior']))
 
             rec_frame = align.resume(info['rec_frame']).clamp(0, 1)
             rate = estimate_bpp(info['likelihoods'], input=rec_frame).mean().item()
@@ -633,7 +633,7 @@ if __name__ == '__main__':
                                              logger=comet_logger,
                                              default_root_dir=args.log_path,
                                              check_val_every_n_epoch=1,
-                                             num_sanity_val_steps=0,
+                                             num_sanity_val_steps=-1,
                                              terminate_on_nan=True)
 
         epoch_num = args.restore_epoch
@@ -659,7 +659,7 @@ if __name__ == '__main__':
                                              logger=comet_logger,
                                              default_root_dir=args.log_path,
                                              check_val_every_n_epoch=1,
-                                             num_sanity_val_steps=0,
+                                             num_sanity_val_steps=-1,
                                              terminate_on_nan=True)
 
         epoch_num = args.restore_epoch
@@ -673,7 +673,7 @@ if __name__ == '__main__':
         new_ckpt = OrderedDict()
 
         for k, v in checkpoint['state_dict'].items():
-            if k.split('.')[0] != 'codec' or  k.split('.')[1] != 'temporal_prior':
+            if k.split('.')[1] != 'temporal_prior':
                 new_ckpt[k] = v
 
         model = VCT(args, codec).cuda()
