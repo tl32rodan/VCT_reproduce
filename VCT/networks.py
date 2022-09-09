@@ -449,7 +449,6 @@ class TransformerEntropyModelwithTargetPrediction(TransformerEntropyModel):
 
         z_cur = self.decode(inputs, z_joint, sz_limit)
         
-
         return z_cur
 
 

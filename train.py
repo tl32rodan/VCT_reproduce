@@ -673,13 +673,13 @@ if __name__ == '__main__':
         new_ckpt = OrderedDict()
 
         for k, v in checkpoint['state_dict'].items():
-            if k.split('.')[1] != 'temporal_prior':
+            if k.split('.')[1] != 'temporal_prior' or k.split('.')[2] != 'trans_cur':
                 new_ckpt[k] = v
 
         model = VCT(args, codec).cuda()
         model.load_state_dict(new_ckpt, strict=False)
         
-        trainer.current_epoch = epoch_num + 1
+        trainer.current_epoch = phase['trainAE']
         
     else:
         trainer = Trainer.from_argparse_args(args,
