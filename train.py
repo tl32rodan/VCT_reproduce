@@ -111,7 +111,7 @@ class VCT(CompressesModel):
             coding_frame = batch[:, 0]
             info = self(coding_frame, 0)
 
-            distortion = self.criterion(coding_frame, info['rec_frame'])
+            distortion = self.criterion(coding_frame, info['rec_frame'], enable_LRP=False)
             if self.args.ssim:
                 distortion = (1 - distortion)/64
 
@@ -136,7 +136,7 @@ class VCT(CompressesModel):
             loss = torch.tensor(0., dtype=torch.float, device=batch.device)
             for idx in range(2, 5):
                 coding_frame = batch[:, idx]
-                info = self(coding_frame, idx)
+                info = self(coding_frame, idx, enable_LRP=False)
 
                 rate = estimate_bpp(info['likelihoods'], input=coding_frame)
                 
