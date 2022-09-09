@@ -325,7 +325,7 @@ class TransformerEntropyModel(nn.Module):
     def forward(self, src_seq, trg_seq, sz_limit=0):
         z_joint = self.encode(src_seq)
         
-        z_cur = self.decode(trg_seq, enc_output, sz_limit)
+        z_cur = self.decode(trg_seq, z_joint, sz_limit)
         
         # Ignore the last prediction
         z_cur = z_cur[:, :-1, :]
@@ -407,7 +407,7 @@ class TransformerPriorCoder(CompressesModel):
 
             h_tilde, h_likelihood = self.entropy_bottleneck(hyperpriors)
 
-            condition = self.hyper_synthesis(z_tilde)
+            condition = self.hyper_synthesis(h_tilde)
 
         y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
 
@@ -447,7 +447,7 @@ class TransformerEntropyModelwithTargetPrediction(TransformerEntropyModel):
 
         inputs = torch.cat(inputs, dim=0)
 
-        z_cur = self.decode(inputs, enc_output, sz_limit)
+        z_cur = self.decode(inputs, z_joint, sz_limit)
         
         bs = output.size(0)
         for i in range(trg_seq.size(1)):
