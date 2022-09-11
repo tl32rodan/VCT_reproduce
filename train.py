@@ -33,8 +33,8 @@ plot_rate = PlotHeatMap().cuda()
 #         'trainPrior': 150000, # 50k
 #         'trainAll': 175000} # 25K
 phase = {'trainAE': 30,
-         'trainPrior': 45,
-         'trainAll': 55}
+         'trainPrior': 40,
+         'trainAll': 50}
 
 
 class CompressesModel(LightningModule):
