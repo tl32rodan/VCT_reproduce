@@ -27,6 +27,8 @@ from VCT.util.ssim import MS_SSIM
 from VCT.util.vision import PlotFlow, PlotHeatMap, save_image
 from VCT.util.tools import Alignment
 
+plot_rate = PlotHeatMap().cuda()
+
 #phase = {'trainAE': 100000, # 100k
 #         'trainPrior': 150000, # 50k
 #         'trainAll': 175000} # 25K
@@ -240,7 +242,6 @@ class VCT(CompressesModel):
             if frame_idx < 3:
                 upload_img(coding_frame.cpu().numpy()[0], f'{seq_name}_{epoch}_gt_frame_{frame_idx+frame_id}.png', grid=False)
                 upload_img(rec_frame.cpu().numpy()[0], seq_name + '_{:d}_rec_frame_{:d}_{:.3f}.png'.format(epoch, frame_idx+frame_id, similarity), grid=False)
-
             loss = self.args.lmda * mse + rate
 
             similarity_list.append(similarity)
@@ -304,10 +305,11 @@ class VCT(CompressesModel):
 
         dataset_name, seq_name, batch, frame_id_start = batch
 
+        seq_name, dataset_name = seq_name[0], dataset_name[0]
+
         os.makedirs(self.args.save_dir + f'/{seq_name}/gt_frame', exist_ok=True)
         os.makedirs(self.args.save_dir + f'/{seq_name}/rec_frame', exist_ok=True)
-
-        seq_name, dataset_name = seq_name[0], dataset_name[0]
+        os.makedirs(self.args.save_dir + f'/{seq_name}/rate_heatmap', exist_ok=True)
 
         gop_size = batch.size(1)
 
@@ -319,7 +321,7 @@ class VCT(CompressesModel):
         align = Alignment()
         
         for frame_idx in range(gop_size):
-            TO_VISUALIZE = False and frame_idx < 8
+            TO_VISUALIZE = frame_idx < 8
 
             coding_frame = batch[:, frame_idx]
 
@@ -331,7 +333,8 @@ class VCT(CompressesModel):
                     }
                 macs, params = get_model_complexity_info(self, tuple(align.align(coding_frame).shape), input_constructor=dummy_cstr)
                 print(macs)
-            info = self(align.align(coding_frame), frame_idx)
+
+            info = self(align.align(coding_frame), frame_idx, enable_LRP=False)
 
             rec_frame = align.resume(info['rec_frame']).clamp(0, 1)
             rate = estimate_bpp(info['likelihoods'], input=rec_frame).mean().item()
@@ -348,8 +351,16 @@ class VCT(CompressesModel):
             metrics['Rate'].append(rate)
 
             if TO_VISUALIZE:
-                save_image(coding_frame[0], os.path.join(self.args.save_dir, f'{seq_name}/gt_frame/', f'frame_{int(frame_id_start + frame_idx)}.png'), nrow=1)
-                save_image(rec_frame[0], os.path.join(self.args.save_dir, f'{seq_name}/rec_frame/', f'frame_{int(frame_id_start + frame_idx)}.png'), nrow=1)
+                rate_map = info['likelihoods'][0].log()/(-np.log(2.)*height*width)
+                rate_heatmap = [torch.cat([rate_map[0, i:i+1, :, :]], dim=0) for i in range(rate_map.size(1))]
+                rate_heatmap = make_grid(rate_heatmap, 8)
+
+                save_image(rate_heatmap, os.path.join(self.args.save_dir, f'{seq_name}/rate_heatmap/', 
+                                                      f'frame_{int(frame_id_start + frame_idx)}.png'), nrow=1)
+                save_image(coding_frame[0], os.path.join(self.args.save_dir, f'{seq_name}/gt_frame/', 
+                                                         f'frame_{int(frame_id_start + frame_idx)}.png'), nrow=1)
+                save_image(rec_frame[0], os.path.join(self.args.save_dir, f'{seq_name}/rec_frame/', 
+                                                      f'frame_{int(frame_id_start + frame_idx)}.png'), nrow=1)
 
             log_list.append({similarity_metrics: similarity, 'Rate': rate})
             
@@ -649,7 +660,7 @@ if __name__ == '__main__':
         if args.restore == 'resume':
             trainer.current_epoch = epoch_num + 1
         else:
-            trainer.current_epoch = epoch_num + 1
+            trainer.current_epoch = epoch_num - 3
    
     elif args.restore == 'custom':
         trainer = Trainer.from_argparse_args(args,
@@ -704,6 +715,7 @@ if __name__ == '__main__':
         summary(model.codec.temporal_prior.trans_cur)
 
     if args.test:
+        model.eval()
         trainer.test(model)
     else:
         trainer.fit(model)

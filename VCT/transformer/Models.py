@@ -20,7 +20,6 @@ def get_subsequent_mask(seq, sz_limit=0):
     len_s, sz, _ = seq.size()
     mask = torch.zeros((sz, sz))
     _sz = sz - sz_limit
-    print(_sz)
     mask[:_sz, :_sz] = torch.triu(torch.full((_sz, _sz), float('-inf')), diagonal=1)
 
     return mask
