@@ -145,7 +145,7 @@ class VCT(CompressesModel):
             
             for idx in range(2, 5):
                 coding_frame = batch[:, idx]
-                info = self(coding_frame, idx, enable_LRP=(epoch <= phase['trainPrior']))
+                info = self(coding_frame, idx, enable_LRP=(epoch >= phase['trainPrior']))
 
                 distortion = self.criterion(coding_frame, info['rec_frame'])
                 if self.args.ssim:
