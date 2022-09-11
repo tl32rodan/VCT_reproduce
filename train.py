@@ -136,8 +136,8 @@ class VCT(CompressesModel):
 
             # Prepare latents of first 2 frames
             with torch.no_grad():
-                _ = self(batch[:, 0], 0)
-                _ = self(batch[:, 1], 1)
+                _ = self(batch[:, 0], 0, enable_LRP=(epoch >= phase['trainPrior']))
+                _ = self(batch[:, 1], 1, enable_LRP=(epoch >= phase['trainPrior']))
             
             loss = torch.tensor(0., dtype=torch.float, device=batch.device)
             total_distortion = torch.tensor(0., dtype=torch.float, device=batch.device)
