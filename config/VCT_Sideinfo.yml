@@ -13,6 +13,7 @@ model_params:
     d_C: 192
     d_T: 768
     d_inner: 2048
+    d_src_vocab: 192
     d_trg_vocab: 384
     condition: Gaussian
     quant_mode: noise
