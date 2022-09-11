@@ -126,32 +126,14 @@ class VCT(CompressesModel):
                     'train/PSNR': mse2psnr(distortion.mean().item()), 
                     'train/rate': rate.mean().item(), 
                    }
-        elif epoch < phase['trainPrior']:
-            # Disable AE
-            self.disable_modules([self.codec.analysis, self.codec.synthesis])
-
-            # Prepare latents of first 2 frames
-            with torch.no_grad():
-                _ = self(batch[:, 0], 0, enable_LRP=False)
-                _ = self(batch[:, 1], 1, enable_LRP=False)
-            
-            loss = torch.tensor(0., dtype=torch.float, device=batch.device)
-            for idx in range(2, 5):
-                coding_frame = batch[:, idx]
-                info = self(coding_frame, idx, enable_LRP=False)
-
-                rate = estimate_bpp(info['likelihoods'], input=coding_frame)
-                
-                loss += rate.mean()
-
-            loss /= 3
-
-            logs = {
-                    'train/rate': loss.item(),
-                   }
 
         elif epoch < phase['trainAll']:
             self.requires_grad_(True)
+
+            if epoch < phase['trainPrior']:
+                # Disable AE
+                self.disable_modules([self.codec.analysis, self.codec.synthesis])
+
             # Prepare latents of first 2 frames
             with torch.no_grad():
                 _ = self(batch[:, 0], 0)
