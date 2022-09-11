@@ -130,8 +130,8 @@ class VCT(CompressesModel):
 
             # Prepare latents of first 2 frames
             with torch.no_grad():
-                _ = self(batch[:, 0], 0)
-                _ = self(batch[:, 1], 1)
+                _ = self(batch[:, 0], 0, enable_LRP=False)
+                _ = self(batch[:, 1], 1, enable_LRP=False)
             
             loss = torch.tensor(0., dtype=torch.float, device=batch.device)
             for idx in range(2, 5):
@@ -633,7 +633,7 @@ if __name__ == '__main__':
                                              logger=comet_logger,
                                              default_root_dir=args.log_path,
                                              check_val_every_n_epoch=1,
-                                             num_sanity_val_steps=-1,
+                                             num_sanity_val_steps=0,
                                              terminate_on_nan=True)
 
         epoch_num = args.restore_epoch
@@ -659,7 +659,7 @@ if __name__ == '__main__':
                                              logger=comet_logger,
                                              default_root_dir=args.log_path,
                                              check_val_every_n_epoch=1,
-                                             num_sanity_val_steps=-1,
+                                             num_sanity_val_steps=0,
                                              terminate_on_nan=True)
 
         epoch_num = args.restore_epoch
