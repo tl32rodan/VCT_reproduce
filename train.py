@@ -7,6 +7,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import sys
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 from functools import partial
 from torchinfo import summary
@@ -20,7 +22,7 @@ from torchvision.utils import make_grid
 from ptflops import get_model_complexity_info
 
 from dataloader import VimeoDataset, VideoTestData
-from VCT.entropy_models import EntropyBottleneck, estimate_bpp
+from VCT.entropy_models import EntropyBottleneck, estimate_bpp, lower_bound
 from VCT.networks import __CODER_TYPES__
 from VCT.util.psnr import mse2psnr
 from VCT.util.ssim import MS_SSIM
@@ -33,8 +35,8 @@ plot_rate = PlotHeatMap().cuda()
 #         'trainPrior': 150000, # 50k
 #         'trainAll': 175000} # 25K
 phase = {'trainAE': 30,
-         'trainPrior': 40,
-         'trainAll': 50}
+         'trainPrior': 70,
+         'trainAll': 100}
 
 
 class CompressesModel(LightningModule):
@@ -84,21 +86,23 @@ class VCT(CompressesModel):
     def forward(self, coding_frame, frame_idx=0, enable_LRP=True):
         if frame_idx == 0:
             self.latent_buffer = []
-            reconstructed, likelihoods, latent = self.codec(coding_frame, 'hyper', enable_LRP=enable_LRP)
+            reconstructed, likelihoods, latent, condition = self.codec(coding_frame, 'hyper', enable_LRP=enable_LRP)
 
             # For first P-frame, 2 latents are needed so it needs to be duplicated
             self.latent_buffer.append(latent)
             self.latent_buffer.append(latent)
         else:
-            reconstructed, likelihoods, latent = self.codec(coding_frame, 'temp', self.latent_buffer, enable_LRP=enable_LRP)
+            reconstructed, likelihoods, latent, condition = self.codec(coding_frame, 'temp', self.latent_buffer, enable_LRP=enable_LRP)
 
             self.latent_buffer = [self.latent_buffer[1], latent]
             
         return {
                 'rec_frame': reconstructed, 
                 'likelihoods': likelihoods, 
-                'latent': latent
+                'latent': latent,
+                'condition': condition
                }
+
     def disable_modules(self, modules):
         for module in modules:
             module.requires_grad_(False)
@@ -111,9 +115,9 @@ class VCT(CompressesModel):
         
         if epoch < phase['trainAE']:
             coding_frame = batch[:, 0]
-            info = self(coding_frame, 0)
+            info = self(coding_frame, 0, enable_LRP=False)
 
-            distortion = self.criterion(coding_frame, info['rec_frame'], enable_LRP=False)
+            distortion = self.criterion(coding_frame, info['rec_frame'])
             if self.args.ssim:
                 distortion = (1 - distortion)/64
 
@@ -127,12 +131,48 @@ class VCT(CompressesModel):
                     'train/rate': rate.mean().item(), 
                    }
 
+        elif epoch < phase['trainPrior']:
+            # Disable AE
+            self.disable_modules([self.codec.analysis, self.codec.synthesis])
+
+            def visual_feat(feat_map, save_name='./tmp/tmp.png'):
+                heatmap = make_grid([feat_map[:, i, :, :] for i in range(feat_map.size(1))], nrow=8)[0, :, :].detach().cpu().numpy()
+                plt.figure()
+                rate_heatmap = sns.heatmap(heatmap, xticklabels=False, yticklabels=False)
+                plt.savefig(save_name, dpi=400)
+
+
+            # Prepare latents of first 2 frames
+            with torch.no_grad():
+                _0 = self(batch[:, 0], 0, enable_LRP=False)
+                #visual_feat(_0['latent'], f'./tmp/0_y.png')
+                #mean, var = torch.chunk(_0['condition'][0], 2, dim=1)
+                #visual_feat(mean, './tmp/0_mean.png')
+                #visual_feat(var, './tmp/0_var.png')
+                _1 = self(batch[:, 1], 1, enable_LRP=False)
+            
+            loss = torch.tensor(0., dtype=torch.float, device=batch.device)
+            
+            for idx in range(2, 5):
+                coding_frame = batch[:, idx]
+                info = self(coding_frame, idx, enable_LRP=False)
+
+                rate = estimate_bpp(info['likelihoods'], input=coding_frame)
+                #visual_feat(info['latent'], f'./tmp/{idx}_y.png')
+                #mean, var = torch.chunk(info['condition'][0], 2, dim=1)
+                #visual_feat(mean, f'./tmp/{idx}_mean.png')
+                #visual_feat(var, f'./tmp/{idx}_var.png')
+
+                loss += rate.mean()
+
+            loss /= 3
+            logs = {
+                    'train/loss': loss.item(),
+                    'train/hp_rate': estimate_bpp(_0['likelihoods'], input=batch[:, 0]).mean().item()
+                   }
+
         elif epoch < phase['trainAll']:
             self.requires_grad_(True)
-
-            if epoch < phase['trainPrior']:
-                # Disable AE
-                self.disable_modules([self.codec.analysis, self.codec.synthesis])
 
             # Prepare latents of first 2 frames
             with torch.no_grad():
@@ -292,6 +332,8 @@ class VCT(CompressesModel):
         os.makedirs(self.args.save_dir + f'/{seq_name}/gt_frame', exist_ok=True)
         os.makedirs(self.args.save_dir + f'/{seq_name}/rec_frame', exist_ok=True)
         os.makedirs(self.args.save_dir + f'/{seq_name}/rate_heatmap', exist_ok=True)
+        os.makedirs(self.args.save_dir + f'/{seq_name}/condition', exist_ok=True)
+        os.makedirs(self.args.save_dir + f'/{seq_name}/latent', exist_ok=True)
 
         gop_size = batch.size(1)
 
@@ -303,7 +345,7 @@ class VCT(CompressesModel):
         align = Alignment()
         
         for frame_idx in range(gop_size):
-            TO_VISUALIZE = frame_idx < 8
+            TO_VISUALIZE = self.args.verbose and frame_idx < 8
 
             coding_frame = batch[:, frame_idx]
 
@@ -332,17 +374,36 @@ class VCT(CompressesModel):
             metrics[similarity_metrics].append(similarity)
             metrics['Rate'].append(rate)
 
-            if TO_VISUALIZE:
-                rate_map = info['likelihoods'][0].log()/(-np.log(2.)*height*width)
-                rate_heatmap = [torch.cat([rate_map[0, i:i+1, :, :]], dim=0) for i in range(rate_map.size(1))]
-                rate_heatmap = make_grid(rate_heatmap, 8)
+            print(rate)
 
-                save_image(rate_heatmap, os.path.join(self.args.save_dir, f'{seq_name}/rate_heatmap/', 
-                                                      f'frame_{int(frame_id_start + frame_idx)}.png'), nrow=1)
+            if TO_VISUALIZE:
+                def visual_feat(feat_map, save_name='./tmp/tmp.png'):
+                    heatmap = make_grid([feat_map[:, i, :, :] for i in range(feat_map.size(1))], nrow=8)[0, :, :].cpu().numpy()
+                    plt.figure()
+                    rate_heatmap = sns.heatmap(heatmap, xticklabels=False, yticklabels=False)
+                    plt.savefig(save_name, dpi=400)
+                # y rate
+                rate_map = lower_bound(info['likelihoods'][0], 1e-9).log()/(-np.log(2.))
+                visual_feat(rate_map, os.path.join(self.args.save_dir, f'{seq_name}/rate_heatmap/frame_{int(frame_id_start + frame_idx)}_y.png'))
+
+                # mean & var
+                mean, var = torch.chunk(info['condition'][0], 2, dim=1)
+                visual_feat(mean, os.path.join(self.args.save_dir, f'{seq_name}/condition/frame_{int(frame_id_start + frame_idx)}_mean.png'))
+                visual_feat(var, os.path.join(self.args.save_dir, f'{seq_name}/condition/frame_{int(frame_id_start + frame_idx)}_var.png'))
+
+                # y_tilde
+                visual_feat(info['latent'], os.path.join(self.args.save_dir, f'{seq_name}/latent/frame_{int(frame_id_start + frame_idx)}.png'))
+
+                if frame_idx == 0:
+                    # z rate
+                    rate_map = lower_bound(info['likelihoods'][1], 1e-9).log()/(-np.log(2.))
+                    visual_feat(rate_map, os.path.join(self.args.save_dir, f'{seq_name}/rate_heatmap/frame_{int(frame_id_start + frame_idx)}_z.png'))
+                    
+
                 save_image(coding_frame[0], os.path.join(self.args.save_dir, f'{seq_name}/gt_frame/', 
                                                          f'frame_{int(frame_id_start + frame_idx)}.png'), nrow=1)
                 save_image(rec_frame[0], os.path.join(self.args.save_dir, f'{seq_name}/rec_frame/', 
-                                                      f'frame_{int(frame_id_start + frame_idx)}.png'), nrow=1)
+                                                         f'frame_{int(frame_id_start + frame_idx)}.png'), nrow=1)
 
             log_list.append({similarity_metrics: similarity, 'Rate': rate})
             
@@ -469,8 +530,12 @@ class VCT(CompressesModel):
                 for param in group["params"]:
                     if param.grad is not None:
                         param.grad.data.clamp_(-grad_clip, grad_clip)
+        def get_lr(opt):
+            for param_group in opt.param_groups:
+                return param_group['lr']
 
-        #clip_gradient(optimizer, 5)
+        clip_gradient(optimizer, 5)
+        #print(get_lr(optimizer))
 
         optimizer.step()
         optimizer.zero_grad()
@@ -636,13 +701,14 @@ if __name__ == '__main__':
             checkpoint = torch.load(os.path.join(args.log_path, project_name, args.restore_key, "checkpoints", f"epoch={epoch_num}.ckpt"),
                                     map_location=(lambda storage, loc: storage))
         
+
         model = VCT(args, codec).cuda()
         model.load_state_dict(checkpoint['state_dict'], strict=True)
         
         if args.restore == 'resume':
             trainer.current_epoch = epoch_num + 1
         else:
-            trainer.current_epoch = epoch_num - 3
+            trainer.current_epoch = phase['trainAE']
    
     elif args.restore == 'custom':
         trainer = Trainer.from_argparse_args(args,
@@ -652,7 +718,7 @@ if __name__ == '__main__':
                                              logger=comet_logger,
                                              default_root_dir=args.log_path,
                                              check_val_every_n_epoch=1,
-                                             num_sanity_val_steps=0,
+                                             num_sanity_val_steps=-1,
                                              terminate_on_nan=True)
 
         epoch_num = args.restore_epoch
@@ -666,11 +732,14 @@ if __name__ == '__main__':
         new_ckpt = OrderedDict()
 
         for k, v in checkpoint['state_dict'].items():
-            if k.split('.')[1] != 'temporal_prior' or k.split('.')[2] != 'trans_cur':
+            if k.split('.')[1] == 'trg_word_prj' :
+                key = '.'.join([k.split('.')[0], 'temporal_prior'] + k.split('.')[1:])
+                new_ckpt[key] = v
+            else:
                 new_ckpt[k] = v
 
         model = VCT(args, codec).cuda()
-        model.load_state_dict(new_ckpt, strict=False)
+        model.load_state_dict(new_ckpt, strict=True)
         
         trainer.current_epoch = phase['trainAE']
         

@@ -20,7 +20,9 @@ def get_subsequent_mask(seq, sz_limit=0):
     len_s, sz, _ = seq.size()
     mask = torch.zeros((sz, sz))
     _sz = sz - sz_limit
-    mask[:_sz, :_sz] = torch.triu(torch.full((_sz, _sz), float('-inf')), diagonal=1)
+
+    _mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+    mask[:_sz, :_sz] = _mask.float().masked_fill(_mask == 0, float('-inf')).masked_fill(_mask == 1, float(0.0))
 
     return mask
 
@@ -70,8 +72,8 @@ class Encoder(nn.Module):
         self.d_model = d_model
 
     def forward(self, src_seq, src_mask):
+        enc_output = self.proj(src_seq.transpose(0, 1)) # In NLP, data used to be (seq_len, batch_size, ...)
 
-        enc_output = self.proj(src_seq).transpose(0, 1) # In NLP, data should be (seq_len, batch_size, ...)
         if self.scale_emb:
             enc_output *= self.d_model ** 0.5
         enc_output = self.position_enc(enc_output)
@@ -79,7 +81,7 @@ class Encoder(nn.Module):
 
         for enc_layer in self.layer_stack:
             enc_output = enc_layer(enc_output, src_mask=src_mask)
-
+        
         return enc_output.transpose(0, 1)
 
 
@@ -107,8 +109,8 @@ class Decoder(nn.Module):
 
     def forward(self, trg_seq, trg_mask, enc_output, src_mask):
 
-        enc_output = enc_output.transpose(0, 1) # In NLP, input data is used to be (seq_len, batch_size, ...)
-        dec_output = self.proj(trg_seq).transpose(0, 1)
+        enc_output = enc_output.transpose(0, 1) # In NLP, input data used to be (seq_len, batch_size, ...)
+        dec_output = self.proj(trg_seq.transpose(0, 1))
         if self.scale_emb:
             dec_output *= self.d_model ** 0.5
         dec_output = self.position_enc(dec_output)

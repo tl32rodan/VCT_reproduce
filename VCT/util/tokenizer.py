@@ -66,11 +66,11 @@ def token2feat(tokens, block_size=(4, 4), feat_size=(16, 3, 16, 16)):
 
 
 if __name__ == '__main__':
-    a = torch.arange(2*3*4*4).view(2, 3, 4, 4)
+    a = torch.arange(1*3*4*4).view(1, 3, 4, 4)
     print('a ', a, a.shape)
     tokens = feat2token(a, (2, 2), (2, 2))
     print('tokens ', tokens, tokens.shape)
-    feat = token2feat(tokens, (2, 2), (2, 3, 4, 4))
+    feat = token2feat(tokens, (2, 2), (1, 3, 4, 4))
     print('feat ', feat, feat.shape)
-    overlap_tokens = feat2token(a, (4, 4), (2, 2))
-    print('overlap_tokens ', overlap_tokens, overlap_tokens.shape)
+    #overlap_tokens = feat2token(a, (4, 4), (2, 2), [1]*4)
+    #print('overlap_tokens ', overlap_tokens, overlap_tokens.shape)
