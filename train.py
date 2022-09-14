@@ -349,7 +349,7 @@ class VCT(CompressesModel):
 
             coding_frame = batch[:, frame_idx]
 
-            if self.args.verbose and frame_idx > 0:
+            if False and self.args.verbose and frame_idx > 0:
                 def dummy_cstr(f):
                     return{
                         'coding_frame': torch.ones(f).cuda(),
@@ -708,7 +708,8 @@ if __name__ == '__main__':
         if args.restore == 'resume':
             trainer.current_epoch = epoch_num + 1
         else:
-            trainer.current_epoch = phase['trainAE']
+            #trainer.current_epoch = phase['trainAE']
+            trainer.current_epoch = epoch_num + 1
    
     elif args.restore == 'custom':
         trainer = Trainer.from_argparse_args(args,

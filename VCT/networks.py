@@ -337,9 +337,9 @@ class TransformerEntropyModel(nn.Module):
     def forward(self, feature, prev_features=None, sz_limit=0):
         assert not (prev_features is None) and isinstance(prev_features, list) and len(prev_features) > 0, ValueError
 
-        prev_tokens = [feat2token(feat, \
-                                  block_size=(self.w_p, self.w_p), \
-                                  stride=(self.w_c, self.w_c), \
+        prev_tokens = [feat2token(feat,
+                                  block_size=(self.w_p, self.w_p),
+                                  stride=(self.w_c, self.w_c),
                                   padding=[(self.w_p-self.w_c)//2]*4) 
                        for feat in prev_features]
 
@@ -350,38 +350,49 @@ class TransformerEntropyModel(nn.Module):
         num_blocks = (h//self.w_c)*(w//self.w_c)
 
         if self.training:
+            # Get quantized feature first
             output = self.entropy_model.quantize(feature, self.entropy_model.quant_mode)
-
+            
+            # Tokenize quantized feature
             cur_token = feat2token(output, block_size=(self.w_c, self.w_c)) # cur_token.shape=(b*num_blocks, seq_len, self.d_C)
 
-            # Add start token
+            # Add start token to input tokens
             start_token = torch.cat([self.start_token]*(b*num_blocks), dim=0)
             trg_seq = torch.cat([start_token, cur_token], dim=1)[:, :-1, :] # Ignore the last cur_token
             
+            # Generate prediction (condition ; mean & scale) all at once
             condition, z_cur = self.decode(trg_seq, z_joint, sz_limit, True)
-
+            
+            # Turn condition into 4D feature map
             condition = token2feat(condition, block_size=(self.w_c, self.w_c), feat_size=(b, c*2, h, w))
-
+            
+            # Entropy estimation
             output, likelihood = self.entropy_model(feature, condition=condition)
-
+            
             z_cur = token2feat(z_cur, block_size=(self.w_c, self.w_c), feat_size=((b, self.d_T, h, w)))
 
         else:
-            condition = torch.zeros((b, c*2, h, w)).to(prev_features[0].device) # Empty condition
-
+            # Prepare empty condition. The generation condition needs to be sequential
+            condition = torch.zeros((b, c*2, h, w)).to(prev_features[0].device)
+            
+            # First input token = start token
             trg_seq = start_token = torch.cat([self.start_token]*(b*num_blocks), dim=0)
-
+            
+            # Sequentially generate condition
             for i in range(self.w_c):
                 for j in range(self.w_c):
                     idx = i*self.w_c + j
+
                     if idx == seq_len - 1:
                         _condition, z_cur = self.decode(trg_seq, z_joint, sz_limit, True) # The last z_cur will be the right z_cur
                         _condition = _condition[:, idx: idx+1, :] # mean & scale of p(t_idx)
                     else:
                         _condition = self.decode(trg_seq, z_joint, sz_limit, False)[:, idx: idx+1, :] # mean & scale of p(t_idx)
                         
+                    # Turn condition into 4D feature map
                     _condition = token2feat(_condition, block_size=(1, 1), feat_size=(b, c*2, h//self.w_c, w//self.w_c))
                     
+                    # Entropy estimation ; _output is correctly decoded. Note: _output = (output - mean).round() + mean != feature.round() 
                     _output, _likelihood = self.entropy_model(feature[:, :, i::self.w_c, j::self.w_c], _condition) # Quantized t_idx
 
                     condition[:, :, i::self.w_c, j::self.w_c] = _condition
@@ -474,14 +485,103 @@ class TransformerPriorCoder(CompressesModel):
 
 
 class TransformerEntropyModelwithTargetPrediction(TransformerEntropyModel):
-    def __init__(self, w_c=4, w_p=8, d_C=192, d_T=192, d_inner=2048, d_src_vocab=None, d_trg_vocab=None):
-        super(TransformerEntropyModelwithTargetPrediction, self).__init__(w_c, w_p, d_C, d_T, d_inner, d_src_vocab, d_trg_vocab)
+    def __init__(self, **kwargs):
+        super(TransformerEntropyModelwithTargetPrediction, self).__init__(**kwargs)
 
-    def decode(self, trg_seq, enc_output, sz_limit=0):
 
-        dec_output = self.trans_cur(trg_seq, None, enc_output, None)
-        
-        return dec_output
+    def decode(self, trg_seq, enc_output, sz_limit=0, return_z_cur=True):
+        """Transformer decoder"""
+        z_cur = self.trans_cur(trg_seq, None, enc_output, None)
+
+        dec_output = self.trg_word_prj(z_cur)
+
+        # Multiply (\sqrt{d_model} ^ -1) to linear projection output
+        dec_output *= (self.d_T ** -0.5)
+
+        if return_z_cur:
+            return dec_output, z_cur
+        else:
+            return dec_output
+
+    def forward(self, feature, prev_features=None, prediction=None, sz_limit=0):
+        assert not (prev_features is None) and isinstance(prev_features, list) and len(prev_features) > 0, ValueError
+
+        prev_tokens = [feat2token(feat,
+                                  block_size=(self.w_p, self.w_p),
+                                  stride=(self.w_c, self.w_c),
+                                  padding=[(self.w_p-self.w_c)//2]*4) 
+                       for feat in prev_features]
+
+        prediction_token = feat2token(prediction,
+                                   block_size=(self.w_p, self.w_p),
+                                   stride=(self.w_c, self.w_c),
+                                   padding=[(self.w_p-self.w_c)//2]*4)
+        # Encode
+        z_joint = self.encode(prev_tokens)
+
+        b, c, h, w = prev_features[0].size()
+        seq_len = self.w_c * self.w_c
+        num_blocks = (h//self.w_c)*(w//self.w_c)
+
+        # Decode
+        if self.training:
+            # Get quantized feature first
+            output = self.entropy_model.quantize(feature, self.entropy_model.quant_mode)
+            
+            # Tokenize quantized feature
+            cur_token = feat2token(output, block_size=(self.w_c, self.w_c)) # cur_token.shape=(b*num_blocks, seq_len, self.d_C)
+
+            # Add start token to input tokens
+            trg_seq = torch.cat([prediction_token]*2, dim=1)
+            for idx in range(seq_len):
+                # Generate prediction (condition ; mean & scale) all at once
+                condition, z_cur = self.decode(trg_seq, z_joint, sz_limit, True)
+            
+            # Turn condition into 4D feature map
+            condition = token2feat(condition, block_size=(self.w_c, self.w_c), feat_size=(b, c*2, h, w))
+            
+            # Entropy estimation
+            output, likelihood = self.entropy_model(feature, condition=condition)
+            
+            z_cur = token2feat(z_cur, block_size=(self.w_c, self.w_c), feat_size=((b, self.d_T, h, w)))
+
+        else:
+            # Prepare empty condition. The generation condition needs to be sequential
+            condition = torch.zeros((b, c*2, h, w)).to(prev_features[0].device)
+            z_cur = torch.zeros((b, self.d_T, h, w)).to(prev_features[0].device)
+            
+            # First input token = start token
+            trg_seq = start_token = torch.cat([self.start_token]*(b*num_blocks), dim=0)
+            
+            # Sequentially generate condition
+            for i in range(self.w_c):
+                for j in range(self.w_c):
+                    idx = i*self.w_c + j
+
+                    if idx == seq_len - 1:
+                        _condition, z_cur = self.decode(trg_seq, z_joint, sz_limit, True) # The last z_cur will be the right z_cur
+                        _condition = _condition[:, idx: idx+1, :] # mean & scale of p(t_idx)
+                    else:
+                        _condition = self.decode(trg_seq, z_joint, sz_limit, False)[:, idx: idx+1, :] # mean & scale of p(t_idx)
+                        
+                    # Turn condition into 4D feature map
+                    _condition = token2feat(_condition, block_size=(1, 1), feat_size=(b, c*2, h//self.w_c, w//self.w_c))
+                    
+                    # Entropy estimation ; _output is correctly decoded. Note: _output = (output - mean).round() + mean != feature.round() 
+                    _output, _likelihood = self.entropy_model(feature[:, :, i::self.w_c, j::self.w_c], _condition) # Quantized t_idx
+
+                    condition[:, :, i::self.w_c, j::self.w_c] = _condition
+                    
+                    _cur_token = feat2token(_output, block_size=(1, 1))
+                    
+                    # Decoder input for next stage
+                    trg_seq = torch.cat([trg_seq, _cur_token], dim=1)
+
+            output, likelihood = self.entropy_model(feature, condition=condition)
+            z_cur = token2feat(z_cur, block_size=(self.w_c, self.w_c), feat_size=((b, self.d_T, h, w)))
+
+        return output, likelihood, (condition, z_cur)
+
 
     def forward(self, src_seq, trg_seq, trg_pred, sz_limit=0):
         z_joint = self.encode(src_seq)

@@ -50,7 +50,7 @@ def token2feat(tokens, block_size=(4, 4), feat_size=(16, 3, 16, 16)):
     b, t, c = tokens.size()
     feat = torch.zeros(feat_size).to(tokens.device)
 
-    assert t == block_size[0]*block_size[1], ValueError
+    assert t == block_size[0]*block_size[1], ValueError # Sequence length
     assert (not b%feat_size[0]) and (c == feat_size[1]), ValueError
 
     num_tokens = (feat_size[2] // block_size[0], feat_size[3] // block_size[1])
@@ -58,19 +58,19 @@ def token2feat(tokens, block_size=(4, 4), feat_size=(16, 3, 16, 16)):
 
     for _h in range(num_tokens[0]):
         for _w in range(num_tokens[1]):
-            _block = tokens[_h*num_tokens[0]+_w].view(feat_size[0], block_size[0], block_size[1], c).contiguous()
+            _block = tokens[_h*num_tokens[1]+_w].view(feat_size[0], block_size[0], block_size[1], c).contiguous()
 
-            feat[:, :, _h*block_size[0]:(_h+1)*block_size[0], _w*block_size[0]:(_w+1)*block_size[0]] = _block.permute(0, 3, 1, 2)
+            feat[:, :, _h*block_size[0]:(_h+1)*block_size[0], _w*block_size[1]:(_w+1)*block_size[1]] = _block.permute(0, 3, 1, 2)
 
     return feat
 
 
 if __name__ == '__main__':
-    a = torch.arange(1*3*4*4).view(1, 3, 4, 4)
+    a = torch.arange(2*3*4*8).view(2, 3, 4, 8)
     print('a ', a, a.shape)
     tokens = feat2token(a, (2, 2), (2, 2))
     print('tokens ', tokens, tokens.shape)
-    feat = token2feat(tokens, (2, 2), (1, 3, 4, 4))
+    feat = token2feat(tokens, (2, 2), (2, 3, 4, 8))
     print('feat ', feat, feat.shape)
     #overlap_tokens = feat2token(a, (4, 4), (2, 2), [1]*4)
     #print('overlap_tokens ', overlap_tokens, overlap_tokens.shape)

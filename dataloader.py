@@ -137,7 +137,6 @@ class VideoTestSequence(torchData):
         seed = random.randint(0, 1e9)
         imgs = []
          
-        # First image of `imgs` will be BPG-compressed frame
         for frame_idx in range(frame_start, frame_end):
             random.seed(seed)
 
@@ -241,7 +240,6 @@ class VideoTestData(torchData):
         seed = random.randint(0, 1e9)
         imgs = []
          
-        # First image of `imgs` will be BPG-compressed frame
         for frame_idx in range(frame_start, frame_end):
             random.seed(seed)
 
