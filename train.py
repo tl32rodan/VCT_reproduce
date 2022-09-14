@@ -212,6 +212,10 @@ class VCT(CompressesModel):
                     'train/loss': loss.item(),
                    }
 
+        def get_lr(opt):
+            for param_group in opt.param_groups:
+                return param_group['lr']
+        logs.update({'train/lr': get_lr(self.optimizers())})
         self.log_dict(logs)
 
         return loss 
