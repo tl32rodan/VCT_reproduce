@@ -148,10 +148,10 @@ class VideoTestSequence(torchData):
 
 
 class VideoTestData(torchData):
-    def __init__(self, root, lmda, sequence=('U', 'B'), GOP=12):
+    def __init__(self, root, lmda, sequence=('U', 'B'), GOP=12, first_GOP=False):
         super(VideoTestData, self).__init__()
         
-        assert GOP in [12, 16, 32], ValueError
+        assert GOP in [12, 16, 32, 999], ValueError
         self.root = root
         self.lmda = lmda
         self.qp = {256: 37, 512: 32, 1024: 27, 2048: 22, 4096: 22}[lmda]
@@ -163,11 +163,14 @@ class VideoTestData(torchData):
 
         if 'U' in sequence:
             self.seq_name.extend(['Beauty', 'Bosphorus', 'HoneyBee', 'Jockey', 'ReadySteadyGo', 'ShakeNDry', 'YachtRide'])
-            if GOP in [12, 16]:
+            if GOP in [12, 16, 999]:
                 seq_len.extend([600, 600, 600, 600, 600, 300, 600])
             else:
                 seq_len.extend([96]*7)
-            gop_size.extend([GOP]*7)
+            if GOP == 999:
+                gop_size.extend([30]*7)
+            else:
+                gop_size.extend([GOP]*7)
             dataset_name_list.extend(['U']*7)
         if 'B' in sequence:
             self.seq_name.extend(['Kimono1', 'BQTerrace', 'Cactus', 'BasketballDrive', 'ParkScene'])
@@ -209,13 +212,16 @@ class VideoTestData(torchData):
                 MCL_list.append('videoSRC'+str(i).zfill(2))
                 
             self.seq_name.extend(MCL_list)
-            if GOP in [12, 16]:
+            if GOP in [12, 16, 999]:
                 seq_len.extend([150, 150, 150, 150, 125, 125, 125, 125, 125, 150,
                                 150, 150, 150, 150, 150, 150, 120, 125, 150, 125,
                                 120, 120, 120, 120, 120, 150, 150, 150, 120, 150])
             else:
                 seq_len.extend([96]*30)
-            gop_size.extend([GOP]*30)
+            if GOP == 999:
+                gop_size.extend([32]*30)
+            else:
+                gop_size.extend([GOP]*30)
             dataset_name_list.extend(['M']*30)
 
         seq_len = dict(zip(self.seq_name, seq_len))
@@ -226,11 +232,14 @@ class VideoTestData(torchData):
 
         for seq_name in self.seq_name:
             gop_num = seq_len[seq_name] // gop_size[seq_name]
-            for gop_idx in range(gop_num):
-                self.gop_list.append([dataset_name_list[seq_name],
-                                      seq_name,
-                                      1 + gop_size[seq_name] * gop_idx,
-                                      1 + gop_size[seq_name] * (gop_idx + 1)])
+            if first_GOP:
+                self.gop_list.append([dataset_name_list[seq_name], seq_name, 1, gop_size[seq_name]])
+            else:
+                for gop_idx in range(gop_num):
+                    self.gop_list.append([dataset_name_list[seq_name],
+                                          seq_name,
+                                          1 + gop_size[seq_name] * gop_idx,
+                                          1 + gop_size[seq_name] * (gop_idx + 1)])
         
     def __len__(self):
         return len(self.gop_list)

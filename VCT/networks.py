@@ -6,7 +6,7 @@ from entropy_models import __CONDITIONS__, EntropyBottleneck, SymmetricCondition
 from modules import Conv2d, ConvTranspose2d
 from transformer.Models import get_subsequent_mask, Encoder, Decoder
 from util.tokenizer import feat2token, token2feat
-
+import time
 
 class CompressesModel(nn.Module):
     """Basic Compress Model"""
@@ -289,15 +289,15 @@ class TransformerEntropyModel(nn.Module):
 
         self.trans_sep = Encoder(d_word_vec=d_T, n_layers=6, n_head=16, d_model=d_T, d_inner=d_inner,
                                  use_proj=True, d_src_vocab=d_C if d_src_vocab is None else d_src_vocab,
-                                 dropout=0.1, scale_emb=False)
+                                 dropout=0.01, scale_emb=False)
 
         self.trans_joint = Encoder(d_word_vec=d_T, n_layers=4, n_head=16, d_model=d_T, d_inner=d_inner,
                                    use_proj=False, d_src_vocab=None, # Projection is not needed; it only use (temporal) embedding
-                                   dropout=0.1, scale_emb=False)
+                                   dropout=0.01, scale_emb=False)
 
         self.trans_cur = Decoder(d_word_vec=d_T, n_layers=5, n_head=16, d_model=d_T, d_inner=d_inner,
                                  use_proj=True, d_trg_vocab=d_C if d_trg_vocab is None else d_trg_vocab,
-                                 dropout=0.1, scale_emb=False)
+                                 dropout=0.01, scale_emb=False)
 
         self.start_token = nn.Parameter(torch.Tensor(1, 1, d_C))
 
@@ -340,11 +340,11 @@ class TransformerEntropyModel(nn.Module):
         prev_tokens = [feat2token(feat,
                                   block_size=(self.w_p, self.w_p),
                                   stride=(self.w_c, self.w_c),
-                                  padding=[(self.w_p-self.w_c)//2]*4) 
+                                  padding=[(self.w_p-self.w_c)//2]*2) 
                        for feat in prev_features]
 
         z_joint = self.encode(prev_tokens)
-
+        
         b, c, h, w = prev_features[0].size()
         seq_len = self.w_c * self.w_c
         num_blocks = (h//self.w_c)*(w//self.w_c)
@@ -453,11 +453,11 @@ class TransformerPriorCoder(CompressesModel):
     def decompress(self, strings, shape):
         pass
     
-    def forward(self, input, use_prior='temp', prev_features=None, enable_LRP=True):
+    def forward(self, input, use_prior='temp', prev_features=None, enable_LRP=True, encode_only=False):
         assert use_prior in ['temp', 'hyper'] # Use temporal prior or hyperprior
         if use_prior == 'temp':
             assert not (prev_features is None) and isinstance(prev_features, list), ValueError
-
+        
         features = self.analysis(input)
         
         if use_prior == 'temp':
@@ -468,20 +468,23 @@ class TransformerPriorCoder(CompressesModel):
             hyperpriors = self.hyper_analysis(features)
 
             h_tilde, h_likelihood = self.entropy_bottleneck(hyperpriors)
-
+            
             condition = self.hyper_synthesis(h_tilde)
 
             y_tilde, y_likelihood = self.conditional_bottleneck(features, condition=condition)
 
         if enable_LRP and use_prior == 'temp':
             y_tilde += self.LRP(z_cur)
-
-        reconstructed = self.synthesis(y_tilde)
+        
+        if not encode_only:
+            reconstructed = self.synthesis(y_tilde)
+        else:
+            reconstructed = None
 
         if use_prior == 'temp':
-            return reconstructed, (y_likelihood, ), y_tilde, (condition, z_cur)
+            return reconstructed, (y_likelihood, ), y_tilde, (condition, z_cur, features)
         else:
-            return reconstructed, (y_likelihood, h_likelihood), y_tilde, (condition, )
+            return reconstructed, (y_likelihood, h_likelihood), y_tilde, (condition, features)
 
 
 class TransformerEntropyModelwithTargetPrediction(TransformerEntropyModel):
